@@ -645,7 +645,7 @@ void svCallIsr()
                     tcb[i].priority = tcb[i].priorityInit;
                     tcb[i].sp = tcb[i].spInit;
                     tcb[i].state = STATE_UNRUN;
-                    break;
+                    NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Context swtich
                 }
             }
             break;
