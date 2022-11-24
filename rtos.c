@@ -120,11 +120,13 @@ struct _tcb
     void *pid;                     // used to uniquely identify thread
     void *spInit;                  // original top of stack
     void *sp;                      // current stack pointer
+    int8_t priorityInit;           // Original priority
     int8_t priority;               // 0=highest to 15=lowest
     uint32_t ticks;                // ticks until sleep complete
     uint32_t srd;                  // MPU subregion disable bits (one per 1 KiB)
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
+
 } tcb[MAX_TASKS];
 
 uint32_t *heapTopPtr = 0x20008000;
@@ -140,6 +142,9 @@ uint32_t *heapBotPtr = 0x20002000;
 #define SVC_SETPRIORITY  7
 #define SVC_PMAP  8
 #define SVC_PIDOF  9
+#define SVC_IPCS  10
+#define SVC_STOP  17
+#define SVC_RESTART  18
 
 
 
@@ -352,6 +357,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
 // REQUIRED: modify this function to restart a thread
 void restartThread(_fn fn)
 {
+    __asm("SVC #18");
 }
 
 // REQUIRED: modify this function to stop a thread
@@ -359,6 +365,7 @@ void restartThread(_fn fn)
 // NOTE: see notes in class for strategies on whether stack is freed or not
 void stopThread(_fn fn)
 {
+    __asm(" SVC #17")
 }
 
 // REQUIRED: modify this function to set a thread priority
@@ -381,15 +388,11 @@ bool createSemaphore(uint8_t semaphore, uint8_t count)
 void startRtos()
 {
     taskCurrent = rtosScheduler();
-//    tcb[taskCurrent].state =
-//    uint32_t sp = 0x20002000;
     uint32_t sp = (uint32_t)tcb[taskCurrent].sp;
     setPSP(sp);
     setASP();
     _fn fn = tcb[taskCurrent].pid;
     tcb[taskCurrent].state = STATE_READY;
-
-    // All tasks will be ran in unpriveleged mode
     setSramAccessWindow(tcb[taskCurrent].srd);
     removePriv();
     fn();
@@ -399,12 +402,10 @@ void startRtos()
 // REQUIRED: modify this function to yield execution back to scheduler using pendsv
 void yield()
 {
-    // Use assembly
     __asm(" SVC #2");
 }
 
 // REQUIRED: modify this function to support 1ms system timer
-// execution yielded back to scheduler until time elapses using pendsv
 void sleep(uint32_t tick)
 {
     __asm(" SVC #1");
@@ -430,6 +431,9 @@ void getData(uint8_t type, USER_DATA *data)
             break;
         case SVC_PIDOF:
             __asm(" SVC #9");
+            break;
+        case SVC_IPCS:
+            __asm(" SVC #10");
             break;
 }
 // REQUIRED: modify this function to add support for the system timer
@@ -467,8 +471,6 @@ void pendSvIsr()
     if(tcb[taskCurrent].state == STATE_READY)
     {
 
-        // restore sp <- tcb[taskCurrent].sp
-        // pop regs <- psp
         setSramAccessWindow(tcb[taskCurrent].srd);
         setPSP((uint32_t)tcb[taskCurrent].sp);
         popPSPStack();
@@ -575,6 +577,7 @@ void svCallIsr()
                     data.buffer[j] = 0;
                 }
             }
+            break;
         case SVC_PIDOF:
             uint8_t i, j;
             USER_DATA *data = (USER_DATA *)**(psp + 1);
@@ -591,38 +594,68 @@ void svCallIsr()
                 }
             }
             break;
+        case SVC_IPCS:
+            uint8_t i, j;
+            USER_DATA *data = (USER_DATA *)**(psp + 1);
+            for(i = 0; i < MAX_SEMAPHORES; i++)
+            {
+
+            }
+            break;
+        case SVC_STOP:
+            uint8_t i, j;
+            for(i = 0; i < taskCount; i++)
+            {
+                if ((uint32_t *) tcb[i].pid == *psp)
+                {
+                    if(tcb[i].state == STATE_BLOCKED)
+                    {
+                        // Remove process from process queue
+                        for(j = 0; j < ((semaphore *)(tcb[i].semaphore))->queueSize; j++)
+                        {
+                            if (((semaphore *) (tcb[i].semaphore))->processQueue[j] == i)
+                                ((semaphore *) (tcb[i].semaphore))->processQueue[j] = 0;
+
+                            if(((semaphore *) (tcb[i].semaphore))->processQueue[j] == 0)
+                            {
+                                ((semaphore *) (tcb[i].semaphore))->processQueue[j] = ((semaphore *) (tcb[i].semaphore))->processQueue[j + 1];
+                                ((semaphore *) (tcb[i].semaphore))->processQueue[j + 1] = 0;
+                            }
+                        }
+
+                        tcb[i].semaphore = 0;
+                        ((semaphore *)(tcb[i].semaphore))->queueSize--;
+                    }
+                    else if(tcb[i].state == STATE_DELAYED)
+                    {
+                        tcb[i].ticks = 0;
+                    }
+                    tcb[i].state = STATE_INVALID;
+                    tcb[i].srd = tcb[i].spInit;
+                    // TODO Free memory
+                }
+            }
+            break;
+        case SVC_RESTART:
+            uint8_t i;
+            for(i = 0; i < taskCount; i++)
+            {
+                if ((uint32_t *) tcb[i].pid == *psp)
+                {
+                    tcb[i].priority = tcb[i].priorityInit;
+                    tcb[i].sp = tcb[i].spInit;
+                    tcb[i].state = STATE_UNRUN;
+                    break;
+                }
+            }
+            break;
     }
 }
 
-// REQUIRED: code this function
 void mpuFaultIsr()
 {
     putsUart0("MPU fault in process ");
     putiUart0((int32_t)tcb[taskCurrent].pid);
-    putsUart0("\n");
-    // Print PSP, MSP
-    uint32_t *PSP = getPSP();
-    putsUart0("R0:\t");
-    putxUart0(*PSP);        // R0
-    putsUart0("\nR1:\t");
-    putxUart0(*(PSP+1));      // R1
-    putsUart0("\nR2:\t");
-    putxUart0(*(PSP+2));    // R2
-    putsUart0("\nR3:\t");
-    putxUart0(*(PSP+3));    // R3
-    putsUart0("\nR12:\t");
-    putxUart0(*(PSP+4));    // R12
-    putsUart0("\nLR (Offending Instruction Address):\t");
-    putxUart0(*(PSP+5));    // LR
-    putsUart0("\nPC:\t");
-    putxUart0(*(PSP+6));    // PC
-    putsUart0("\nxPSR:\t");
-    putxUart0(*(PSP+7));    // xPSR
-    putsUart0("\n");
-
-    uint32_t *MSP = (uint32_t*)getMSP();
-    putsUart0("MSP: ");
-    putxUart0(*MSP);
     putsUart0("\n");
     putsUart0("MFault flags:\t\t");
     putxUart0(NVIC_FAULT_STAT_R & 0xF); // Prints mfault flags bits 7-0(NVIC_FAULT_STAT_R[7:0])
@@ -642,30 +675,21 @@ void mpuFaultIsr()
         putxUart0(NVIC_FAULT_ADDR_R);
         putsUart0("\n");
     }
-    // Print process stack dump (xPSR, PC, LR, R0 - R3, R12);
 
     NVIC_SYS_HND_CTRL_R &= ~(NVIC_SYS_HND_CTRL_MEMP); // Clear MPU fault pending bit
-    NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Triggers pendsv fault
+    NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Context swtich
 }
 
-// REQUIRED: code this function
 void hardFaultIsr()
 {
     putsUart0("Hard fault in process ");
     putiUart0((int32_t)tcb[taskCurrent].pid);
-    putsUart0("\n");
-    // Print PSP, MSP, and hard fault flags
-    putsUart0("PSP: ");
-    putxUart0((uint32_t)getPSP());
-    putsUart0("MSP: ");
-    putxUart0((uint32_t)getMSP());
     putsUart0("\n");
     putsUart0("HFault flags: ");
     putxUart0(NVIC_HFAULT_STAT_R);
     while(1);
 }
 
-// REQUIRED: code this function
 void busFaultIsr()
 {
     putsUart0("Bus fault in process ");
@@ -674,7 +698,6 @@ void busFaultIsr()
     while(1);
 }
 
-// REQUIRED: code this function
 void usageFaultIsr()
 {
     uint32_t pid = 0;
@@ -724,9 +747,17 @@ void initHw()
     enablePinPullup(PUSHBUTTON4);
     enablePinPullup(PUSHBUTTON5);
 
+
+    // Systick configuration
     NVIC_ST_RELOAD_R =  39999; // 1ms
-//    NVIC_ST_STCURRENT = 1;  // Clears current count
     NVIC_ST_CTRL_R |= NVIC_ST_CTRL_ENABLE | NVIC_ST_CTRL_INTEN | NVIC_ST_CTRL_CLK_SRC;
+
+    // Widetimer configuration
+    WTIMER0_CTL_R &= ~(TIMER_CTL_TAEN | TIMER_CTL_TBEN);
+    WTIMER0_CFG_R = TIMER_CFG_16_BIT;
+    WTIMER0_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACMR | TIMER_TAMR_TACDIR;
+    WTIMER0_TBMR_R = TIMER_TBMR_TBMR_PERIOD | TIMER_TBMR_TBCMR | TIMER_TBMR_TBCDIR;
+    WTIMER0_CTL_R |= TIMER_CTL_TAEN | TIMER_CTL_TBEN;
 }
 
 // REQUIRED: add code to return a value from 0-63 indicating which of 6 PBs are pressed
@@ -935,25 +966,26 @@ void shell()
         static USER_DATA data;
         getsUart0(&data);
         parseFields(&data);
-//        if(isCommand(&data, "reboot" , 0))
-//        {
-//            reboot();
-//        }
-//        else if(isCommand(&data, "ps" , 0))
-//        {
-//            ps();
-//        }
-//        else if(isCommand(&data, "ipcs" , 0))
-//        {
-//            ipcs();
-//        }
-//        else if(isCommand(&data, "kill" , 1))
-//        {
-//            if(!isFieldInteger(&data, 1))
-//                continue;
-//            kill(getFieldInteger(&data, 1));
-//        }
-        if(isCommand(&data, "pmap" , 1))
+        if(isCommand(&data, "reboot" , 0))
+        {
+            reboot();
+        }
+        else if(isCommand(&data, "ps" , 0))
+        {
+
+        }
+        else if(isCommand(&data, "ipcs" , 0))
+        {
+            getData(SVC_IPCS, &data);
+            putsUart0(data.buffer);
+        }
+        else if(isCommand(&data, "kill" , 1))
+        {
+            if(!isFieldInteger(&data, 1))
+                continue;
+            stopThread(getFieldInteger(&data, 1));
+        }
+        else if(isCommand(&data, "pmap" , 1))
         {
             if(!isFieldInteger(&data, 1))
                 continue;
@@ -990,12 +1022,12 @@ void shell()
             putiUart0(data.value);
             putcUart0('\n');
         }
-//        else if(isCommand(&data, "run" , 1))
-//        {
-//            if(!isFieldString(&data, 1))
-//                continue;
-//            run(getFieldString(&data, 1));
-//        }
+        else if(isCommand(&data, "run" , 1))
+        {
+            if(!isFieldString(&data, 1))
+                continue;
+            restartThread(getFieldInteger(&data, 1));
+        }
     }
 
 }
@@ -1043,7 +1075,7 @@ int main(void)
     ok &= createThread(errant, "Errant", 6, 1024);
     ok &= createThread(shell, "Shell", 6, 2048);
 
-    priority = true;
+    priority = false;
     preemption = false;
     // Start up RTOS
     if (ok)
@@ -1053,6 +1085,3 @@ int main(void)
 
     return 0;
 }
-
-
-
