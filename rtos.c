@@ -137,7 +137,9 @@ uint32_t *heapBotPtr = 0x20002000;
 #define SVC_WAIT  4
 #define SVC_POST  5
 #define SVC_MALLOC  6
-#define SVC_PMAP  7
+#define SVC_SETPRIORITY  7
+#define SVC_PMAP  8
+#define SVC_PIDOF  9
 
 
 
@@ -362,6 +364,7 @@ void stopThread(_fn fn)
 // REQUIRED: modify this function to set a thread priority
 void setThreadPriority(_fn fn, uint8_t priority)
 {
+    __asm(" SVC #7");
 }
 
 bool createSemaphore(uint8_t semaphore, uint8_t count)
@@ -419,6 +422,16 @@ void post(int8_t semaphore)
     __asm(" SVC #5");
 }
 
+void getData(uint8_t type, USER_DATA *data)
+{
+    switch(type)
+        case SVC_PMAP:
+            __asm(" SVC #8");
+            break;
+        case SVC_PIDOF:
+            __asm(" SVC #9");
+            break;
+}
 // REQUIRED: modify this function to add support for the system timer
 // REQUIRED: in preemptive code, add code to request task switch
 void systickIsr()
@@ -499,6 +512,9 @@ void svCallIsr()
                 semaphores[*psp].count--;
             else
             {
+                if(semaphores[*psp].queueSize >= MAX_QUEUE_SIZE)
+                    NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Triggers pendsv fault
+
                 semaphores[*psp].processQueue[semaphores[*psp].queueSize] = taskCurrent; // Add current task to Queue
                 semaphores[*psp].queueSize++;
                 tcb[taskCurrent].state = STATE_BLOCKED;
@@ -533,19 +549,46 @@ void svCallIsr()
             tcb[taskCurrent].srd |= getSramSRD(heapTopPtr, *psp);
             pushPSPRegisterOffset(OFFSET_R0, heapTopPtr);
             break;
-        case SVC_PMAP:
-            putsUart0("Name\t\t\tAddress\t\t\tSize\t\t\tStack/Heap\n");
+        case SVC_SETPRIORITY:
             uint8_t i;
             for(i = 0; i < taskCount; i++)
             {
-                putsUart0(tcb[i].name);
-                putsUart0("\t\t\t");
-                putxUart0((uint32_t *)tcb[i].spInit);
-                putsUart0("\t\t\t");
-                putiUart0(srdToSize(tcb[i].srd));
-                putsUart0("\t\t\t");
-                putsUart0("Stack");
-                putcUart0('\n');
+                if((uint32_t *)tcb[i].pid == *psp)
+                {
+                    tcb[i].priority = *(psp + 1);
+                    break;
+                }
+            }
+            break;
+        case SVC_PMAP:
+            uint8_t i, j;
+            for(i = 0; i < taskCount; i++)
+            {
+                if((uint32_t *)tcb[i].pid == *psp)
+                {
+                    USER_DATA *data = (USER_DATA *)**(psp + 1);
+                    char *heading = "Name\t\t\tAddress\t\t\tSize\t\t\tStack/Heap\n";
+                    for(j = 0; j < 3; j++)
+                    {
+                        data.buffer[j] = heading[j];
+                    }
+                    data.buffer[j] = 0;
+                }
+            }
+        case SVC_PIDOF:
+            uint8_t i, j;
+            USER_DATA *data = (USER_DATA *)**(psp + 1);
+            for(i = 0; i < taskCount; i++)
+            {
+                while(tcb[i].name[j] == data.buffer[j])
+                {
+                    if(tcb[i].name[j] == 0)
+                    {
+                        data.value = (uint32_t *)tcb[i].pid;
+                        break;
+                    }
+                    j++;
+                }
             }
             break;
     }
@@ -889,14 +932,9 @@ void shell()
 {
     while (true)
     {
-        USER_DATA data;
-        while(!kbhitUart0())
-            yield();
-        __asm(" SVC #7");
-        yield();
-
-//        getsUart0(&data);
-//        parseFields(&data);
+        static USER_DATA data;
+        getsUart0(&data);
+        parseFields(&data);
 //        if(isCommand(&data, "reboot" , 0))
 //        {
 //            reboot();
@@ -915,38 +953,43 @@ void shell()
 //                continue;
 //            kill(getFieldInteger(&data, 1));
 //        }
-//        else if(isCommand(&data, "pmap" , 1))
-//        {
-//            if(!isFieldInteger(&data, 1))
-//                continue;
-//            pmap(getFieldInteger(&data, 1));
-//        }
-//        else if(isCommand(&data, "preempt" , 1))
-//        {
-//            if(!isFieldString(&data, 1))
-//                continue;
-//            if(stringCompare(getFieldString(&data, 1), "on"))
-//                preempt(ON);
-//            else if(stringCompare(getFieldString(&data, 1), "off"))
-//                preempt(OFF);
-//
-//
-//        }
-//        else if(isCommand(&data, "sched" , 1))
-//        {
-//            if(!isFieldString(&data, 1))
-//                continue;
-//            if(stringCompare(getFieldString(&data, 1), "prio"))
-//                sched(PRIO);
-//            else if(stringCompare(getFieldString(&data, 1), "rr"))
-//                sched(RR);
-//        }
-//        else if(isCommand(&data, "pidof" , 1))
-//        {
-//            if(!isFieldString(&data, 1))
-//                continue;
-//            pidof(getFieldString(&data, 1));
-//        }
+        if(isCommand(&data, "pmap" , 1))
+        {
+            if(!isFieldInteger(&data, 1))
+                continue;
+            getData(SVC_PMAP, &data);
+            putsUart0(&data.buffer);
+        }
+        else if(isCommand(&data, "preempt" , 1))
+        {
+            if(!isFieldString(&data, 1))
+                continue;
+            if(stringCompare(getFieldString(&data, 1), "on"))
+                preemption = true;
+            else if(stringCompare(getFieldString(&data, 1), "off"))
+                preemption = false;
+        }
+        else if(isCommand(&data, "sched" , 1))
+        {
+            if(!isFieldString(&data, 1))
+                continue;
+            if(stringCompare(getFieldString(&data, 1), "prio"))
+                priority = true;
+            else if(stringCompare(getFieldString(&data, 1), "rr"))
+                priority = false;
+        }
+        else if(isCommand(&data, "pidof" , 1))
+        {
+            if(!isFieldString(&data, 1))
+                continue;
+
+            getData(SVC_PIDOF, &data);
+            putsUart0("Name\t\t\tPID\n");
+            putsUart0(data.buffer);
+            putsUart0("\t\t\t");
+            putiUart0(data.value);
+            putcUart0('\n');
+        }
 //        else if(isCommand(&data, "run" , 1))
 //        {
 //            if(!isFieldString(&data, 1))

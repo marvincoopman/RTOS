@@ -33,6 +33,7 @@ typedef struct _USER_DATA
     uint8_t fieldCount;
     uint8_t fieldPosition[MAX_FIELDS];
     char fieldType[MAX_FIELDS]; //n = number a = alpha f = float
+    uint32_t value;
 } USER_DATA;
 
 //-----------------------------------------------------------------------------
