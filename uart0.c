@@ -151,7 +151,7 @@ void putxUart0(uint32_t num)
 char getcUart0(void)
 {
 //    while (UART0_FR_R & UART_FR_RXFE);               // wait if uart0 rx fifo empty
-    if(UART0_FR_R & UART_FR_RXFE)                       // if Uart0 rx fifo is empty --> yield
+    while(UART0_FR_R & UART_FR_RXFE)                       // if Uart0 rx fifo is empty --> yield
         __asm(" SVC #2");
     return UART0_DR_R & 0xFF;                        // get character from fifo
 }

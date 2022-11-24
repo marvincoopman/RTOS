@@ -357,7 +357,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
 // REQUIRED: modify this function to restart a thread
 void restartThread(_fn fn)
 {
-    __asm("SVC #18");
+    __asm(" SVC #18");
 }
 
 // REQUIRED: modify this function to stop a thread
@@ -365,7 +365,7 @@ void restartThread(_fn fn)
 // NOTE: see notes in class for strategies on whether stack is freed or not
 void stopThread(_fn fn)
 {
-    __asm(" SVC #17")
+    __asm(" SVC #17");
 }
 
 // REQUIRED: modify this function to set a thread priority
@@ -396,7 +396,6 @@ void startRtos()
     setSramAccessWindow(tcb[taskCurrent].srd);
     removePriv();
     fn();
-
 }
 
 // REQUIRED: modify this function to yield execution back to scheduler using pendsv
@@ -426,6 +425,7 @@ void post(int8_t semaphore)
 void getData(uint8_t type, USER_DATA *data)
 {
     switch(type)
+    {
         case SVC_PMAP:
             __asm(" SVC #8");
             break;
@@ -435,6 +435,7 @@ void getData(uint8_t type, USER_DATA *data)
         case SVC_IPCS:
             __asm(" SVC #10");
             break;
+    }
 }
 // REQUIRED: modify this function to add support for the system timer
 // REQUIRED: in preemptive code, add code to request task switch
@@ -493,23 +494,31 @@ void pendSvIsr()
 // REQUIRED: in preemptive code, add code to handle synchronization primitives
 void svCallIsr()
 {
+    static uint8_t i, j;
     // Extracting SVC value
     uint32_t *psp = getPSP();
     uint16_t *pc = *(psp + 6);
     uint8_t value = (*(pc - 1) & 0xFF);
     switch(value) {
         case SVC_SLEEP:
+        {
             tcb[taskCurrent].state = STATE_DELAYED;
             tcb[taskCurrent].ticks = *psp;  // Retrieves R0
             NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
             break;
+        }
         case SVC_YIELD:
+        {
             NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Triggers pendsv fault
             break;
+        }
         case SVC_SYSTICK:
+        {
             NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Triggers pendsv fault
             break;
+        }
         case SVC_WAIT:
+        {
             if (semaphores[*psp].count > 0)
                 semaphores[*psp].count--;
             else
@@ -520,11 +529,13 @@ void svCallIsr()
                 semaphores[*psp].processQueue[semaphores[*psp].queueSize] = taskCurrent; // Add current task to Queue
                 semaphores[*psp].queueSize++;
                 tcb[taskCurrent].state = STATE_BLOCKED;
-                tcb[taskCurrent].semaphore = semaphores[*psp];
+                tcb[taskCurrent].semaphore = (void *)&semaphores[*psp];
                 NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Triggers pendsv fault
             }
             break;
+        }
         case SVC_POST:
+        {
             semaphores[*psp].count++;
             if(semaphores[*psp].queueSize > 0)
             {
@@ -540,70 +551,77 @@ void svCallIsr()
             }
             NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Triggers pendsv fault
             break;
+        }
         case SVC_MALLOC:
+        {
             if(*psp == 0)
-                return;
+                break;
 
             if(heapTopPtr - heapBotPtr < *psp)
-                return;
+                break;
 
             heapTopPtr -= (((*psp - 1) / 1024) + 1) * (1024 / 4);
             tcb[taskCurrent].srd |= getSramSRD(heapTopPtr, *psp);
             pushPSPRegisterOffset(OFFSET_R0, heapTopPtr);
             break;
+        }
         case SVC_SETPRIORITY:
-            uint8_t i;
+        {
             for(i = 0; i < taskCount; i++)
             {
-                if((uint32_t *)tcb[i].pid == *psp)
+                if((uint32_t)tcb[i].pid == *psp)
                 {
                     tcb[i].priority = *(psp + 1);
-                    break;
+//                    break;
                 }
             }
             break;
+        }
         case SVC_PMAP:
-            uint8_t i, j;
+        {
             for(i = 0; i < taskCount; i++)
             {
-                if((uint32_t *)tcb[i].pid == *psp)
+                if((uint32_t)tcb[i].pid == *psp)
                 {
-                    USER_DATA *data = (USER_DATA *)**(psp + 1);
+                    USER_DATA *data = (USER_DATA *) *(psp + 1);
                     char *heading = "Name\t\t\tAddress\t\t\tSize\t\t\tStack/Heap\n";
                     for(j = 0; j < 3; j++)
                     {
-                        data.buffer[j] = heading[j];
+                        data->buffer[j] = heading[j];
                     }
-                    data.buffer[j] = 0;
+                    data->buffer[j] = 0;
                 }
             }
             break;
+        }
         case SVC_PIDOF:
-            uint8_t i, j;
-            USER_DATA *data = (USER_DATA *)**(psp + 1);
+        {
+            USER_DATA *data = (USER_DATA *) *(psp + 1);
             for(i = 0; i < taskCount; i++)
             {
-                while(tcb[i].name[j] == data.buffer[j])
+                while(tcb[i].name[j] == data->buffer[j])
                 {
                     if(tcb[i].name[j] == 0)
                     {
-                        data.value = (uint32_t *)tcb[i].pid;
+                        data->value = (uint32_t *)tcb[i].pid;
                         break;
                     }
                     j++;
                 }
             }
             break;
+        }
         case SVC_IPCS:
-            uint8_t i, j;
-            USER_DATA *data = (USER_DATA *)**(psp + 1);
+        {
+            USER_DATA *data = (USER_DATA *) *(psp + 1);
             for(i = 0; i < MAX_SEMAPHORES; i++)
             {
 
             }
             break;
+        }
         case SVC_STOP:
-            uint8_t i, j;
+        {
             for(i = 0; i < taskCount; i++)
             {
                 if ((uint32_t *) tcb[i].pid == *psp)
@@ -636,8 +654,9 @@ void svCallIsr()
                 }
             }
             break;
+        }
         case SVC_RESTART:
-            uint8_t i;
+        {
             for(i = 0; i < taskCount; i++)
             {
                 if ((uint32_t *) tcb[i].pid == *psp)
@@ -649,6 +668,7 @@ void svCallIsr()
                 }
             }
             break;
+        }
     }
 }
 
@@ -753,11 +773,11 @@ void initHw()
     NVIC_ST_CTRL_R |= NVIC_ST_CTRL_ENABLE | NVIC_ST_CTRL_INTEN | NVIC_ST_CTRL_CLK_SRC;
 
     // Widetimer configuration
-    WTIMER0_CTL_R &= ~(TIMER_CTL_TAEN | TIMER_CTL_TBEN);
-    WTIMER0_CFG_R = TIMER_CFG_16_BIT;
-    WTIMER0_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACMR | TIMER_TAMR_TACDIR;
-    WTIMER0_TBMR_R = TIMER_TBMR_TBMR_PERIOD | TIMER_TBMR_TBCMR | TIMER_TBMR_TBCDIR;
-    WTIMER0_CTL_R |= TIMER_CTL_TAEN | TIMER_CTL_TBEN;
+//    WTIMER0_CTL_R &= ~(TIMER_CTL_TAEN | TIMER_CTL_TBEN);
+//    WTIMER0_CFG_R = TIMER_CFG_16_BIT;
+//    WTIMER0_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACMR | TIMER_TAMR_TACDIR;
+//    WTIMER0_TBMR_R = TIMER_TBMR_TBMR_PERIOD | TIMER_TBMR_TBCMR | TIMER_TBMR_TBCDIR;
+//    WTIMER0_CTL_R |= TIMER_CTL_TAEN | TIMER_CTL_TBEN;
 }
 
 // REQUIRED: add code to return a value from 0-63 indicating which of 6 PBs are pressed
@@ -968,7 +988,7 @@ void shell()
         parseFields(&data);
         if(isCommand(&data, "reboot" , 0))
         {
-            reboot();
+
         }
         else if(isCommand(&data, "ps" , 0))
         {
