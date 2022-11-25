@@ -107,8 +107,8 @@ semaphore semaphores[MAX_SEMAPHORES];
 #define MAX_TASKS 12       // maximum number of valid tasks
 uint8_t taskCurrent = 0;   // index of last dispatched task //HINT: taskCurrent <-- sched \n fn = task[taskCurrent].pfn \n *fn(); setPSP and setTMPL
 uint8_t taskCount = 0;     // total number of valid tasks
-bool priority;
-bool preemption;
+bool priority = false;
+bool preemption = false;
 
 
 // REQUIRED: add store and management for the memory used by the thread stacks
@@ -129,8 +129,12 @@ struct _tcb
 
 } tcb[MAX_TASKS];
 
-uint32_t *heapTopPtr = 0x20008000;
 uint32_t *heapBotPtr = 0x20002000;
+#define SRAMTOPADDR 0x20008000
+#define SRAMBOTADDR 0x20000000
+#define STACKALLOCATED 1
+#define HEAPALLOCATED 2
+uint8_t memoryBlocks[32] = {0};
 
 #define OFFSET_R0  0
 #define SVC_SLEEP  1
@@ -169,7 +173,13 @@ void * allocaFromHeap(uint32_t size_in_bytes)
 
     void *temp = (void *)heapBotPtr;
     putxUart0((uint32_t)heapBotPtr);
+    uint8_t numberOfSubregions = ((size_in_bytes - 1) / 1024);
+    uint32_t currentSubregion = (heapBotPtr - SRAMBOTADDR) / 1024;
     heapBotPtr += (((size_in_bytes - 1) / 1024) + 1) * (1024 / 4);
+    uint8_t i;
+    for(i = 0; i < numberOfSubregions; i++)
+        memoryBlocks[i + currentSubregion] = STACKALLOCATED;
+
     return temp;
 }
 
@@ -337,8 +347,9 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].pid = fn;
             tcb[i].sp = allocaFromHeap(stackBytes);   // HINT: ACTIVE SP (0 if function is inactive)
             tcb[i].spInit = tcb[i].sp;                      // HINT: Top of the stack (backup copy of SP should be result of malloc)
+            tcb[i].priorityInit = priority;
             tcb[i].priority = priority;
-            tcb[i].srd = getSramSRD(tcb[i].sp, stackBytes) | 0x1F; // Or'ed with 0x1F to stack in SRAM
+            tcb[i].srd = getSramSRD(*(uint32_t *)tcb[i].sp, stackBytes) | 0x1F; // Or'ed with 0x1F to stack in SRAM
             while(name[j] != 0) // Strcpy
             {
                 tcb[i].name[j] = name[j];
@@ -560,7 +571,13 @@ void svCallIsr()
             if(heapTopPtr - heapBotPtr < *psp)
                 break;
 
-            heapTopPtr -= (((*psp - 1) / 1024) + 1) * (1024 / 4);
+            i = 31;
+            while(memoryBlocks[--i] != EMPTYALLOCATION)
+            {
+                if(memoryBlocks[i] == STACKALLOCATED)
+                    return;
+            }
+            void *heapTopPtr = SRAMTOPADDR - ((32 - i) * 1024);
             tcb[taskCurrent].srd |= getSramSRD(heapTopPtr, *psp);
             pushPSPRegisterOffset(OFFSET_R0, heapTopPtr);
             break;
@@ -599,14 +616,10 @@ void svCallIsr()
             USER_DATA *data = (USER_DATA *) *(psp + 1);
             for(i = 0; i < taskCount; i++)
             {
-                while(tcb[i].name[j] == data->buffer[j])
+                if(stringCompare(getFieldString(data, 1)), tcb[i].name)
                 {
-                    if(tcb[i].name[j] == 0)
-                    {
-                        data->value = (uint32_t *)tcb[i].pid;
-                        break;
-                    }
-                    j++;
+                    data->value = *(uint32_t *)tcb[i].pid;
+                    break;
                 }
             }
             break;
@@ -773,6 +786,8 @@ void initHw()
     NVIC_ST_CTRL_R |= NVIC_ST_CTRL_ENABLE | NVIC_ST_CTRL_INTEN | NVIC_ST_CTRL_CLK_SRC;
 
     // Widetimer configuration
+
+//    SYSCTL_RCGCWTIMER_R |= SYSCTL_RCGCWTIMER_R0;
 //    WTIMER0_CTL_R &= ~(TIMER_CTL_TAEN | TIMER_CTL_TBEN);
 //    WTIMER0_CFG_R = TIMER_CFG_16_BIT;
 //    WTIMER0_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACMR | TIMER_TAMR_TACDIR;
@@ -869,7 +884,6 @@ void lengthyFn()
     // Example of allocating memory from stack
     // This will show up in the pmap command for this thread
     p = mallocFromHeap(1024);
-    putxUart0(p);
     *p = 0;
 
     while(true)
@@ -1046,7 +1060,7 @@ void shell()
         {
             if(!isFieldString(&data, 1))
                 continue;
-            restartThread(getFieldInteger(&data, 1));
+            restartThread((_fn)getFieldInteger(&data, 1));
         }
     }
 
@@ -1082,21 +1096,19 @@ int main(void)
     createSemaphore(resource, 1);
 
     // Add required idle process at lowest priority
-    ok =  createThread(idle, "Idle", 7, 1024);
+    ok =  createThread(idle, "idle", 7, 1024);
 
     // Add other processes
-    ok &= createThread(lengthyFn, "LengthyFn", 6, 1024);
-    ok &= createThread(flash4Hz, "Flash4Hz", 4, 1024);
-    ok &= createThread(oneshot, "OneShot", 2, 1024);
-    ok &= createThread(readKeys, "ReadKeys", 6, 1024);
-    ok &= createThread(debounce, "Debounce", 6, 1024);
-    ok &= createThread(important, "Important", 0, 1024);
-    ok &= createThread(uncooperative, "Uncoop", 6, 1024);
-    ok &= createThread(errant, "Errant", 6, 1024);
-    ok &= createThread(shell, "Shell", 6, 2048);
+    ok &= createThread(lengthyFn, "lengthyFn", 6, 1024);
+    ok &= createThread(flash4Hz, "flash4Hz", 4, 1024);
+    ok &= createThread(oneshot, "oneShot", 2, 1024);
+    ok &= createThread(readKeys, "readKeys", 6, 1024);
+    ok &= createThread(debounce, "debounce", 6, 1024);
+    ok &= createThread(important, "important", 0, 1024);
+    ok &= createThread(uncooperative, "uncoop", 6, 1024);
+    ok &= createThread(errant, "errant", 6, 1024);
+    ok &= createThread(shell, "shell", 6, 2048);
 
-    priority = false;
-    preemption = false;
     // Start up RTOS
     if (ok)
         startRtos(); // never returns
