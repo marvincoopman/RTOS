@@ -70,6 +70,7 @@
 typedef void (*_fn)();
 
 void updateMemoryBlocks(uint8_t task, uint32_t srd, int8_t type);
+void freeMemoryBlocks(uint32_t srd);
 
 // semaphore
 #define MAX_SEMAPHORES 5
@@ -146,6 +147,7 @@ uint32_t *heapBotPtr = 0x20002000;
 #define SVC_IPCS  10
 #define SVC_PREEMPT  11
 #define SVC_PRIORITY  12
+#define SVC_REBOOT  13
 #define SVC_STOP  17
 #define SVC_RESTART  18
 
@@ -173,7 +175,6 @@ void * allocaFromHeap(uint32_t size_in_bytes)
     void *temp = (void *)heapBotPtr;
     putxUart0((uint32_t)heapBotPtr);
     heapBotPtr += (((size_in_bytes - 1) / 1024) + 1) * (1024 / 4);
-
     return temp;
 }
 
@@ -450,6 +451,9 @@ void getData(uint8_t type, USER_DATA *data)
         case SVC_PRIORITY:
             __asm(" SVC #12");
             break;
+        case SVC_REBOOT:
+            __asm(" SVC #13");
+            break;
     }
 }
 // REQUIRED: modify this function to add support for the system timer
@@ -510,10 +514,9 @@ void pendSvIsr()
 void svCallIsr()
 {
     static uint8_t i, j;
-    // Extracting SVC value
     uint32_t *psp = getPSP();
     uint16_t *pc = *(psp + 6);
-    uint8_t value = (*(pc - 1) & 0xFF);
+    uint8_t value = (*(pc - 1) & 0xFF); // Extracts SVC Number
     switch(value) {
         case SVC_SLEEP:
         {
@@ -524,12 +527,12 @@ void svCallIsr()
         }
         case SVC_YIELD:
         {
-            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Triggers pendsv fault
+            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
             break;
         }
         case SVC_SYSTICK:
         {
-            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Triggers pendsv fault
+            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
             break;
         }
         case SVC_WAIT:
@@ -594,7 +597,6 @@ void svCallIsr()
                 }
             }
             uint32_t heapTopPtr = (SRAMBOTADDR + (i * 1024));
-
             putxUart0(heapTopPtr);
             tcb[taskCurrent].srd |= getSramSRD(heapTopPtr, *psp);
             updateMemoryBlocks(taskCurrent, getSramSRD(heapTopPtr, *psp), ALLOCATION_HEAP);
@@ -666,6 +668,11 @@ void svCallIsr()
             priority = data->value;
             break;
         }
+        case SVC_REBOOT:
+        {
+
+            break;
+        }
         case SVC_STOP:
         {
             for(i = 0; i < taskCount; i++)
@@ -694,7 +701,7 @@ void svCallIsr()
                         tcb[i].ticks = 0;
                     }
                     tcb[i].state = STATE_INVALID;
-                    // TODO Free memory
+                    freeMemoryBlocks(tcb[i].srd);
                 }
             }
             break;
@@ -872,6 +879,20 @@ void updateMemoryBlocks(uint8_t task, uint32_t srd, int8_t type)
         srd >>= 1;
     }
 }
+
+void freeMemoryBlocks(uint32_t srd)
+{
+    uint8_t i;
+    for(i = 0; i < 32; i++)
+    {
+        if(srd & 1 && memoryBlocks[i].allocationType == ALLOCATION_HEAP)
+        {
+            memoryBlocks[i].ownership = -1;
+            memoryBlocks[i].allocationType = ALLOCATION_EMPTY;
+        }
+        srd >>= 1;
+    }
+}
 // ------------------------------------------------------------------------------
 //  Task functions
 // ------------------------------------------------------------------------------
@@ -1044,7 +1065,7 @@ void shell()
         parseFields(&data);
         if(isCommand(&data, "reboot" , 0))
         {
-
+            getData(SVC_REBOOT, &data);
         }
         else if(isCommand(&data, "ps" , 0))
         {
@@ -1066,7 +1087,7 @@ void shell()
             if(!isFieldInteger(&data, 1))
                 continue;
             getData(SVC_PMAP, &data);
-            putsUart0(&data.buffer);
+            putsUart0(data.buffer);
         }
         else if(isCommand(&data, "preempt" , 1))
         {
@@ -1105,7 +1126,7 @@ void shell()
 
             getData(SVC_PIDOF, &data);
             putsUart0("Name\t\t\tPID\n");
-            putsUart0(data.buffer);
+            putsUart0(getFieldString(&data, 1));
             putsUart0("\t\t\t");
             putiUart0(data.value);
             putcUart0('\n');
@@ -1114,7 +1135,6 @@ void shell()
         {
             if(!isFieldString(&data, 1))
                 continue;
-//            putxUart0(getFieldString(&data, 1));
             restartThread(getFieldString(&data, 1));
         }
     }
