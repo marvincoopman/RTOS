@@ -80,6 +80,7 @@ typedef struct _semaphore
     uint16_t count;
     uint16_t queueSize;
     uint32_t processQueue[MAX_QUEUE_SIZE]; // store task index here
+    char name[16]; // store task index here
 } semaphore;
 
 semaphore semaphores[MAX_SEMAPHORES];
@@ -100,7 +101,7 @@ semaphore semaphores[MAX_SEMAPHORES];
 uint8_t taskCurrent = 0;   // index of last dispatched task //HINT: taskCurrent <-- sched \n fn = task[taskCurrent].pfn \n *fn(); setPSP and setTMPL
 uint8_t taskCount = 0;     // total number of valid tasks
 bool priority = true;
-bool preemption = true;
+bool preemption = false;
 
 
 // REQUIRED: add store and management for the memory used by the thread stacks
@@ -277,6 +278,7 @@ void initRtos()
 // REQUIRED: Implement prioritization to 8 levels
 int rtosScheduler()
 {
+//    WTIMER0_
     bool ok;
     static uint8_t task = 0xFF;
     static uint8_t priorityTaskCurrent[MAX_PRIORITIES] = {0};
@@ -382,11 +384,18 @@ void setThreadPriority(_fn fn, uint8_t priority)
     __asm(" SVC #7");
 }
 
-bool createSemaphore(uint8_t semaphore, uint8_t count)
+bool createSemaphore(uint8_t semaphore, uint8_t count, const char name[])
 {
+    uint8_t j = 0;
     bool ok = (semaphore < MAX_SEMAPHORES);
     {
         semaphores[semaphore].count = count;
+        while(name[j] != 0) // Strcpy
+        {
+            semaphores[semaphore].name[j] = name[j];
+            j++;
+        }
+        semaphores[semaphore].name[j] = 0;
     }
     return ok;
 }
@@ -433,7 +442,7 @@ void post(int8_t semaphore)
     __asm(" SVC #5");
 }
 
-void getData(uint8_t type, USER_DATA *data)
+bool getData(uint8_t type, USER_DATA *data)
 {
     switch(type)
     {
@@ -459,6 +468,7 @@ void getData(uint8_t type, USER_DATA *data)
             __asm(" SVC #14");
             break;
     }
+
 }
 // REQUIRED: modify this function to add support for the system timer
 // REQUIRED: in preemptive code, add code to request task switch
@@ -626,43 +636,66 @@ void svCallIsr()
         }
         case SVC_PMAP:
         {
-            for(i = 0; i < taskCount; i++)
-            {
-                if((uint32_t)tcb[i].pid == *psp)
-                {
-                    USER_DATA *data = (USER_DATA *) *(psp + 1);
-                    char *heading = "Name\t\t\tAddress\t\t\tSize\t\t\tStack/Heap\n";
-                    for(j = 0; j < 3; j++)
-                    {
-                        data->buffer[j] = heading[j];
-                    }
-                    data->buffer[j] = 0;
-                }
-            }
+            // Function\t\t\tAddress\t\t\tSize\t\t\tStack/Heap
+            USER_DATA *data = (USER_DATA *) *(psp + 1);
+
             break;
         }
         case SVC_PIDOF:
         {
+            bool ok = false;
             USER_DATA *data = (USER_DATA *) *(psp + 1);
-            for(i = 0; i < taskCount; i++)
+            uint8_t i = 0;
+            while(!ok && i < taskCount)
             {
-                if(stringCompare(getFieldString(data, 1), tcb[i].name))
+                if((ok = stringCompare(getFieldString(data, 1), tcb[i].name)))
                 {
                     if(tcb[i].state == STATE_INVALID)
                         break;
                     data->value = (uint32_t)tcb[i].pid;
+                    ok = true;
                     break;
                 }
+                i++;
             }
+            pushPSPRegisterOffset(OFFSET_R0, ok); // Invalid name
             break;
         }
         case SVC_IPCS:
         {
             USER_DATA *data = (USER_DATA *) *(psp + 1);
-            for(i = 0; i < MAX_SEMAPHORES; i++)
-            {
+            if(data->savedIndex == 0)
+                data->savedIndex = 1;
+            bool ok = false;
+            uint8_t i = 0;
+            uint8_t j = 0;
 
+            // String copy "Name\t\t\tCount\t\t\tNext process waiting
+            while(semaphores[data->savedIndex].name[i] != 0)
+            {
+                data->shellOutput[i] = semaphores[data->savedIndex].name[i];
+                i++;
             }
+            data->shellOutput[i++] = '\t';
+            data->shellOutput[i++] = '\t';
+            data->shellOutput[i++] = '\t';
+            data->shellOutput[i++] = semaphores[data->savedIndex].count + '0';
+            data->shellOutput[i++] = '\t';
+            data->shellOutput[i++] = '\t';
+            data->shellOutput[i++] = '\t';
+
+            while(tcb[semaphores[data->savedIndex].processQueue[0]].name[j] != 0)
+            {
+                data->shellOutput[i++] = tcb[semaphores[data->savedIndex].processQueue[0]].name[j];
+                j++;
+            }
+
+            data->shellOutput[i] = 0; // Null Character
+            data->savedIndex++;
+            if(data->savedIndex == MAX_SEMAPHORES)
+                pushPSPRegisterOffset(OFFSET_R0, 1); // Done sending data
+            else
+                pushPSPRegisterOffset(OFFSET_R0, 0); // Not done sending data
             break;
         }
         case SVC_PREEMPT:
@@ -683,17 +716,22 @@ void svCallIsr()
         }
         case SVC_PS:
         {
+            bool ok = false;
             USER_DATA *data = (USER_DATA *) *(psp + 1);
-            for(i = 0; i < taskCount; i++)
+            uint8_t i = 0;
+            while(!ok && i < taskCount)
             {
-                if(stringCompare(getFieldString(data, 1), tcb[i].name))
+                if((ok = stringCompare(getFieldString(data, 1), tcb[i].name)))
                 {
                     if(tcb[i].state == STATE_INVALID)
                         break;
                     data->value = (uint32_t)tcb[i].pid;
+                    ok = true;
                     break;
                 }
+                i++;
             }
+            pushPSPRegisterOffset(OFFSET_R0, ok); // Invalid name
             break;
         }
         case SVC_STOP:
@@ -720,9 +758,7 @@ void svCallIsr()
                         ((semaphore *)(tcb[i].semaphore))->queueSize--;
                     }
                     else if(tcb[i].state == STATE_DELAYED)
-                    {
                         tcb[i].ticks = 0;
-                    }
                     else if(tcb[i].hasSemaphore != -1)
                     {
                         // Post semaphore
@@ -864,14 +900,14 @@ void initHw()
     enablePinPullup(PUSHBUTTON5);
 
 
-    // Widetimer configuration
+//     Widetimer configuration
 
-//    SYSCTL_RCGCWTIMER_R |= SYSCTL_RCGCWTIMER_R0;
-//    WTIMER0_CTL_R &= ~(TIMER_CTL_TAEN | TIMER_CTL_TBEN);
-//    WTIMER0_CFG_R = TIMER_CFG_16_BIT;
-//    WTIMER0_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACMR | TIMER_TAMR_TACDIR;
-//    WTIMER0_TBMR_R = TIMER_TBMR_TBMR_PERIOD | TIMER_TBMR_TBCMR | TIMER_TBMR_TBCDIR;
-//    WTIMER0_CTL_R |= TIMER_CTL_TAEN | TIMER_CTL_TBEN;
+    SYSCTL_RCGCWTIMER_R |= SYSCTL_RCGCWTIMER_R0;
+    WTIMER0_CTL_R &= ~(TIMER_CTL_TAEN | TIMER_CTL_TBEN);
+    WTIMER0_CFG_R = TIMER_CFG_16_BIT;
+    WTIMER0_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACMR | TIMER_TAMR_TACDIR;
+    WTIMER0_TBMR_R = TIMER_TBMR_TBMR_PERIOD | TIMER_TBMR_TBCMR | TIMER_TBMR_TBCDIR;
+    WTIMER0_CTL_R |= TIMER_CTL_TAEN | TIMER_CTL_TBEN;
 }
 
 // REQUIRED: add code to return a value from 0-63 indicating which of 6 PBs are pressed
@@ -1102,9 +1138,12 @@ void important()
 // REQUIRED: add processing for the shell commands through the UART here
 void shell()
 {
+    USER_DATA data;
+    bool ok = false;
+    data.value = 0;
+    data.savedIndex = 0;
     while (true)
     {
-        USER_DATA data;
         getsUart0(&data);
         parseFields(&data);
         if(isCommand(&data, "reboot" , 0))
@@ -1116,7 +1155,11 @@ void shell()
             if(!isFieldString(&data, 1))
                 continue;
 
-            getData(SVC_PS, &data);
+            if(!getData(SVC_PS, &data))
+            {
+                putsUart0("Invalid function name\n");
+                continue;
+            }
             putsUart0("Name\t\t\tPID\t\t\tCPU%%\n");
             putsUart0(getFieldString(&data, 1));
             putsUart0("\t\t\t");
@@ -1127,8 +1170,13 @@ void shell()
         }
         else if(isCommand(&data, "ipcs" , 0))
         {
-            getData(SVC_IPCS, &data);
-            putsUart0(data.buffer);
+            putsUart0("Name\t\t\tCount\t\t\tFirst in Queue\n");
+            while(!ok)
+            {
+                ok = getData(SVC_IPCS, &data);
+                putsUart0(data.shellOutput);
+                putcUart0('\n');
+            }
         }
         else if(isCommand(&data, "kill" , 1))
         {
@@ -1140,7 +1188,12 @@ void shell()
         {
             if(!isFieldInteger(&data, 1))
                 continue;
-            getData(SVC_PMAP, &data);
+
+            putsUart0("Name\t\t\tAddress\t\t\tSize\t\t\tStack/Heap\n");
+            while(!ok)
+            {
+                ok = getData(SVC_PMAP, &data);
+            }
             putsUart0(data.buffer);
         }
         else if(isCommand(&data, "preempt" , 1))
@@ -1166,11 +1219,13 @@ void shell()
             {
                 data.value = 1;
                 getData(SVC_PRIORITY, &data);
+                putsUart0("Priority scheduling enabled\n");
             }
             else if(stringCompare(getFieldString(&data, 1), "rr"))
             {
                 data.value = 0;
                 getData(SVC_PRIORITY, &data);
+                putsUart0("Priority scheduling disabled\n");
             }
         }
         else if(isCommand(&data, "pidof" , 1))
@@ -1178,7 +1233,13 @@ void shell()
             if(!isFieldString(&data, 1))
                 continue;
 
-            getData(SVC_PIDOF, &data);
+
+
+            if(!getData(SVC_PIDOF, &data))
+            {
+                putsUart0("Invalid function name\n");
+                continue;
+            }
             putsUart0("Name\t\t\tPID\n");
             putsUart0(getFieldString(&data, 1));
             putsUart0("\t\t\t");
@@ -1192,6 +1253,8 @@ void shell()
             restartThread(getFieldString(&data, 1));
         }
         data.value = 0;
+        data.savedIndex = 0;
+        ok = false;
     }
 
 }
@@ -1220,10 +1283,10 @@ int main(void)
     waitMicrosecond(250000);
 
     // Initialize semaphores
-    createSemaphore(keyPressed, 1);
-    createSemaphore(keyReleased, 0);
-    createSemaphore(flashReq, 5);
-    createSemaphore(resource, 1);
+    createSemaphore(keyPressed, 1, "keypressed");
+    createSemaphore(keyReleased, 0, "keyreleased");
+    createSemaphore(flashReq, 5, "flashreq");
+    createSemaphore(resource, 1, "resource");
 
     // Add required idle process at lowest priority
     ok =  createThread(idle, "idle", 7, 1024);
