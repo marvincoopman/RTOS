@@ -2,9 +2,7 @@
 // J Losh
 
 // Student Name:
-// TO DO: Add your name(s) on this line.
-//        Do not include your ID numbers in the file.
-
+// Marvin Coopman
 // Please do not change any function name in this code or the thread priorities
 
 //-----------------------------------------------------------------------------
@@ -52,15 +50,6 @@
 #include "clock.h"
 #include "rtosASM.h"
 
-// TODO Step7 StartRTOS -> idle -> yield -> idle
-// TODO Step8a __asm(" SVC #__)" yield code
-// TODO continued yield -> svcIsr -> yield -> idle -> yield -> svcIsr ...
-// HINT: SVC service call between 0 - 255 (SvcISR is inside the Kernel-space (MSP, Priv), the rest is Userspace (PSP, Unpriv)
-// HINT: StartRTOS needs to setPSP(tcb[taskCount].sp) fn = tcb[].pFn \n *fn() \n setPSP() \n setTmpL
-// HINT: check stackpointer is correct inside idle()
-// TODO STEP8b SvcIsr ? pendsvIsr will only run if you are not in an interrupt , pendsvISR -> ?
-
-// REQUIRED: correct these bitbanding references for the off-board LEDs
 #define BLUE_LED   PORTF,2 // on-board blue LED
 #define RED_LED    PORTE,0 // off-board red LED
 #define GREEN_LED  PORTA,4 // off-board green LED
@@ -79,6 +68,8 @@
 
 // function pointer
 typedef void (*_fn)();
+
+void updateMemoryBlocks(uint8_t task, uint32_t srd, int8_t type);
 
 // semaphore
 #define MAX_SEMAPHORES 5
@@ -107,7 +98,7 @@ semaphore semaphores[MAX_SEMAPHORES];
 #define MAX_TASKS 12       // maximum number of valid tasks
 uint8_t taskCurrent = 0;   // index of last dispatched task //HINT: taskCurrent <-- sched \n fn = task[taskCurrent].pfn \n *fn(); setPSP and setTMPL
 uint8_t taskCount = 0;     // total number of valid tasks
-bool priority = false;
+bool priority = true;
 bool preemption = false;
 
 
@@ -129,12 +120,18 @@ struct _tcb
 
 } tcb[MAX_TASKS];
 
+struct _memoryBlocks
+{
+    int8_t ownership;
+    uint8_t allocationType;
+}memoryBlocks[32];
+
 uint32_t *heapBotPtr = 0x20002000;
 #define SRAMTOPADDR 0x20008000
 #define SRAMBOTADDR 0x20000000
-#define STACKALLOCATED 1
-#define HEAPALLOCATED 2
-uint8_t memoryBlocks[32] = {0};
+#define ALLOCATION_EMPTY 0
+#define ALLOCATION_STACK 1
+#define ALLOCATION_HEAP 2
 
 #define OFFSET_R0  0
 #define SVC_SLEEP  1
@@ -147,6 +144,8 @@ uint8_t memoryBlocks[32] = {0};
 #define SVC_PMAP  8
 #define SVC_PIDOF  9
 #define SVC_IPCS  10
+#define SVC_PREEMPT  11
+#define SVC_PRIORITY  12
 #define SVC_STOP  17
 #define SVC_RESTART  18
 
@@ -168,17 +167,12 @@ void * allocaFromHeap(uint32_t size_in_bytes)
     if(size_in_bytes == 0)
         return 0;
 
-    if(heapTopPtr - heapBotPtr < size_in_bytes)
-        return 0;
+//    if(heapTopPtr - heapBotPtr < size_in_bytes)
+//        return 0;
 
     void *temp = (void *)heapBotPtr;
     putxUart0((uint32_t)heapBotPtr);
-    uint8_t numberOfSubregions = ((size_in_bytes - 1) / 1024);
-    uint32_t currentSubregion = (heapBotPtr - SRAMBOTADDR) / 1024;
     heapBotPtr += (((size_in_bytes - 1) / 1024) + 1) * (1024 / 4);
-    uint8_t i;
-    for(i = 0; i < numberOfSubregions; i++)
-        memoryBlocks[i + currentSubregion] = STACKALLOCATED;
 
     return temp;
 }
@@ -221,6 +215,7 @@ void setupSramAccess(void)
 
 void setSramAccessWindow(uint32_t mask)
 {
+    mask |= 0x1F;
     // SRAM region 0
     NVIC_MPU_BASE_R = 0x20000013;
     NVIC_MPU_ATTR_R = 0x11060019 | ((mask << 8) & 0xFF00);
@@ -310,10 +305,8 @@ int rtosScheduler()
             task++;
             if (task >= MAX_TASKS)
                 task = 0;
-            ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN)
-                    && tcb[task].priority == maxPriority;
+            ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN) && tcb[task].priority == maxPriority;
         }
-
     }
     return task;
 }
@@ -349,7 +342,9 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].spInit = tcb[i].sp;                      // HINT: Top of the stack (backup copy of SP should be result of malloc)
             tcb[i].priorityInit = priority;
             tcb[i].priority = priority;
-            tcb[i].srd = getSramSRD(*(uint32_t *)tcb[i].sp, stackBytes) | 0x1F; // Or'ed with 0x1F to stack in SRAM
+            tcb[i].srd = getSramSRD(tcb[i].sp, stackBytes); // Or'ed with 0x1F to stack in SRAM
+            // Update global memoryBlock array
+            updateMemoryBlocks(i, tcb[i].srd, ALLOCATION_STACK);
             while(name[j] != 0) // Strcpy
             {
                 tcb[i].name[j] = name[j];
@@ -366,7 +361,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
 }
 
 // REQUIRED: modify this function to restart a thread
-void restartThread(_fn fn)
+void restartThread(char *func)
 {
     __asm(" SVC #18");
 }
@@ -405,6 +400,9 @@ void startRtos()
     _fn fn = tcb[taskCurrent].pid;
     tcb[taskCurrent].state = STATE_READY;
     setSramAccessWindow(tcb[taskCurrent].srd);
+    // Systick configuration
+    NVIC_ST_RELOAD_R =  39999; // 1ms
+    NVIC_ST_CTRL_R |= NVIC_ST_CTRL_ENABLE | NVIC_ST_CTRL_INTEN | NVIC_ST_CTRL_CLK_SRC;
     removePriv();
     fn();
 }
@@ -445,6 +443,12 @@ void getData(uint8_t type, USER_DATA *data)
             break;
         case SVC_IPCS:
             __asm(" SVC #10");
+            break;
+        case SVC_PREEMPT:
+            __asm(" SVC #11");
+            break;
+        case SVC_PRIORITY:
+            __asm(" SVC #12");
             break;
     }
 }
@@ -568,17 +572,32 @@ void svCallIsr()
             if(*psp == 0)
                 break;
 
-            if(heapTopPtr - heapBotPtr < *psp)
-                break;
-
-            i = 31;
-            while(memoryBlocks[--i] != EMPTYALLOCATION)
+            i = 32;
+            j = ((*psp - 1) / 1024) + 1;
+            bool ok = false;
+            while(!ok)
             {
-                if(memoryBlocks[i] == STACKALLOCATED)
+                i--;
+                if(i == 5)
                     return;
+                if(memoryBlocks[i].allocationType == ALLOCATION_EMPTY)
+                {
+                    j--;
+                    if(j == 0)
+                    {
+                        ok = true;
+                    }
+                }
+                else
+                {
+                    j = ((*psp - 1) / 1024) + 1;
+                }
             }
-            void *heapTopPtr = SRAMTOPADDR - ((32 - i) * 1024);
+            uint32_t heapTopPtr = (SRAMBOTADDR + (i * 1024));
+
+            putxUart0(heapTopPtr);
             tcb[taskCurrent].srd |= getSramSRD(heapTopPtr, *psp);
+            updateMemoryBlocks(taskCurrent, getSramSRD(heapTopPtr, *psp), ALLOCATION_HEAP);
             pushPSPRegisterOffset(OFFSET_R0, heapTopPtr);
             break;
         }
@@ -589,7 +608,7 @@ void svCallIsr()
                 if((uint32_t)tcb[i].pid == *psp)
                 {
                     tcb[i].priority = *(psp + 1);
-//                    break;
+                    break;
                 }
             }
             break;
@@ -616,9 +635,11 @@ void svCallIsr()
             USER_DATA *data = (USER_DATA *) *(psp + 1);
             for(i = 0; i < taskCount; i++)
             {
-                if(stringCompare(getFieldString(data, 1)), tcb[i].name)
+                if(stringCompare(getFieldString(data, 1), tcb[i].name))
                 {
-                    data->value = *(uint32_t *)tcb[i].pid;
+                    if(tcb[i].state == STATE_INVALID)
+                        break;
+                    data->value = (uint32_t)tcb[i].pid;
                     break;
                 }
             }
@@ -631,6 +652,18 @@ void svCallIsr()
             {
 
             }
+            break;
+        }
+        case SVC_PREEMPT:
+        {
+            USER_DATA *data = (USER_DATA *) *(psp + 1);
+            preemption = data->value;
+            break;
+        }
+        case SVC_PRIORITY:
+        {
+            USER_DATA *data = (USER_DATA *) *(psp + 1);
+            priority = data->value;
             break;
         }
         case SVC_STOP:
@@ -653,7 +686,6 @@ void svCallIsr()
                                 ((semaphore *) (tcb[i].semaphore))->processQueue[j + 1] = 0;
                             }
                         }
-
                         tcb[i].semaphore = 0;
                         ((semaphore *)(tcb[i].semaphore))->queueSize--;
                     }
@@ -662,7 +694,6 @@ void svCallIsr()
                         tcb[i].ticks = 0;
                     }
                     tcb[i].state = STATE_INVALID;
-                    tcb[i].srd = tcb[i].spInit;
                     // TODO Free memory
                 }
             }
@@ -670,9 +701,10 @@ void svCallIsr()
         }
         case SVC_RESTART:
         {
+            char *func = *psp;
             for(i = 0; i < taskCount; i++)
             {
-                if ((uint32_t *) tcb[i].pid == *psp)
+                if(stringCompare(func, tcb[i].name))
                 {
                     tcb[i].priority = tcb[i].priorityInit;
                     tcb[i].sp = tcb[i].spInit;
@@ -781,10 +813,6 @@ void initHw()
     enablePinPullup(PUSHBUTTON5);
 
 
-    // Systick configuration
-    NVIC_ST_RELOAD_R =  39999; // 1ms
-    NVIC_ST_CTRL_R |= NVIC_ST_CTRL_ENABLE | NVIC_ST_CTRL_INTEN | NVIC_ST_CTRL_CLK_SRC;
-
     // Widetimer configuration
 
 //    SYSCTL_RCGCWTIMER_R |= SYSCTL_RCGCWTIMER_R0;
@@ -831,6 +859,19 @@ uint32_t srdToSize(uint32_t srd)
     return size * 1024;
 }
 
+void updateMemoryBlocks(uint8_t task, uint32_t srd, int8_t type)
+{
+    uint8_t i;
+    for(i = 0; i < 32; i++)
+    {
+        if(srd & 1)
+        {
+            memoryBlocks[i].ownership = task;
+            memoryBlocks[i].allocationType = type;
+        }
+        srd >>= 1;
+    }
+}
 // ------------------------------------------------------------------------------
 //  Task functions
 // ------------------------------------------------------------------------------
@@ -884,6 +925,7 @@ void lengthyFn()
     // Example of allocating memory from stack
     // This will show up in the pmap command for this thread
     p = mallocFromHeap(1024);
+    putxUart0(p);
     *p = 0;
 
     while(true)
@@ -997,7 +1039,7 @@ void shell()
 {
     while (true)
     {
-        static USER_DATA data;
+        USER_DATA data;
         getsUart0(&data);
         parseFields(&data);
         if(isCommand(&data, "reboot" , 0))
@@ -1031,18 +1073,30 @@ void shell()
             if(!isFieldString(&data, 1))
                 continue;
             if(stringCompare(getFieldString(&data, 1), "on"))
-                preemption = true;
+            {
+                data.value = 1;
+                getData(SVC_PREEMPT, &data);
+            }
             else if(stringCompare(getFieldString(&data, 1), "off"))
-                preemption = false;
+            {
+                data.value = 0;
+                getData(SVC_PREEMPT, &data);
+            }
         }
         else if(isCommand(&data, "sched" , 1))
         {
             if(!isFieldString(&data, 1))
                 continue;
             if(stringCompare(getFieldString(&data, 1), "prio"))
-                priority = true;
+            {
+                data.value = 1;
+                getData(SVC_PRIORITY, &data);
+            }
             else if(stringCompare(getFieldString(&data, 1), "rr"))
-                priority = false;
+            {
+                data.value = 0;
+                getData(SVC_PRIORITY, &data);
+            }
         }
         else if(isCommand(&data, "pidof" , 1))
         {
@@ -1060,7 +1114,8 @@ void shell()
         {
             if(!isFieldString(&data, 1))
                 continue;
-            restartThread((_fn)getFieldInteger(&data, 1));
+//            putxUart0(getFieldString(&data, 1));
+            restartThread(getFieldString(&data, 1));
         }
     }
 
