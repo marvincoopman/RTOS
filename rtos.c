@@ -100,7 +100,7 @@ semaphore semaphores[MAX_SEMAPHORES];
 uint8_t taskCurrent = 0;   // index of last dispatched task //HINT: taskCurrent <-- sched \n fn = task[taskCurrent].pfn \n *fn(); setPSP and setTMPL
 uint8_t taskCount = 0;     // total number of valid tasks
 bool priority = true;
-bool preemption = false;
+bool preemption = true;
 
 
 // REQUIRED: add store and management for the memory used by the thread stacks
@@ -118,7 +118,7 @@ struct _tcb
     uint32_t srd;                  // MPU subregion disable bits (one per 1 KiB)
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
-
+    int8_t hasSemaphore;           // Pointer to the semaphore process is using
 } tcb[MAX_TASKS];
 
 struct _memoryBlocks
@@ -148,6 +148,7 @@ uint32_t *heapBotPtr = 0x20002000;
 #define SVC_PREEMPT  11
 #define SVC_PRIORITY  12
 #define SVC_REBOOT  13
+#define SVC_PS  14
 #define SVC_STOP  17
 #define SVC_RESTART  18
 
@@ -454,6 +455,9 @@ void getData(uint8_t type, USER_DATA *data)
         case SVC_REBOOT:
             __asm(" SVC #13");
             break;
+        case SVC_PS:
+            __asm(" SVC #14");
+            break;
     }
 }
 // REQUIRED: modify this function to add support for the system timer
@@ -538,7 +542,10 @@ void svCallIsr()
         case SVC_WAIT:
         {
             if (semaphores[*psp].count > 0)
+            {
                 semaphores[*psp].count--;
+                tcb[taskCurrent].hasSemaphore = *psp;
+            }
             else
             {
                 if(semaphores[*psp].queueSize >= MAX_QUEUE_SIZE)
@@ -554,10 +561,12 @@ void svCallIsr()
         }
         case SVC_POST:
         {
+            tcb[taskCurrent].hasSemaphore = -1;
             semaphores[*psp].count++;
             if(semaphores[*psp].queueSize > 0)
             {
                 tcb[semaphores[*psp].processQueue[0]].state = STATE_READY;
+                tcb[semaphores[*psp].processQueue[0]].hasSemaphore = *psp;
                 tcb[semaphores[*psp].processQueue[0]].semaphore = 0;
                 semaphores[*psp].queueSize--;
                 uint8_t i;
@@ -567,7 +576,7 @@ void svCallIsr()
                 }
                 semaphores[*psp].count--;
             }
-            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Triggers pendsv fault
+//            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Triggers pendsv fault
             break;
         }
         case SVC_MALLOC:
@@ -670,7 +679,21 @@ void svCallIsr()
         }
         case SVC_REBOOT:
         {
-
+            NVIC_APINT_R = NVIC_APINT_VECTKEY | NVIC_APINT_SYSRESETREQ;
+        }
+        case SVC_PS:
+        {
+            USER_DATA *data = (USER_DATA *) *(psp + 1);
+            for(i = 0; i < taskCount; i++)
+            {
+                if(stringCompare(getFieldString(data, 1), tcb[i].name))
+                {
+                    if(tcb[i].state == STATE_INVALID)
+                        break;
+                    data->value = (uint32_t)tcb[i].pid;
+                    break;
+                }
+            }
             break;
         }
         case SVC_STOP:
@@ -700,8 +723,29 @@ void svCallIsr()
                     {
                         tcb[i].ticks = 0;
                     }
+                    else if(tcb[i].hasSemaphore != -1)
+                    {
+                        // Post semaphore
+                        semaphores[tcb[i].hasSemaphore].count++;
+                        if(semaphores[tcb[i].hasSemaphore].queueSize > 0)
+                        {
+                            tcb[semaphores[tcb[i].hasSemaphore].processQueue[0]].state = STATE_READY;
+                            tcb[semaphores[tcb[i].hasSemaphore].processQueue[0]].hasSemaphore = tcb[i].hasSemaphore;
+                            tcb[semaphores[tcb[i].hasSemaphore].processQueue[0]].semaphore = 0;
+                            semaphores[tcb[i].hasSemaphore].queueSize--;
+                            uint8_t j;
+                            for(j = 0; j < semaphores[tcb[i].hasSemaphore].queueSize; j++)
+                            {
+                                semaphores[tcb[i].hasSemaphore].processQueue[j] = semaphores[tcb[i].hasSemaphore].processQueue[j + 1];
+                            }
+                            semaphores[tcb[i].hasSemaphore].count--;
+                        }
+                        tcb[i].hasSemaphore = -1;
+                    }
                     tcb[i].state = STATE_INVALID;
                     freeMemoryBlocks(tcb[i].srd);
+                    NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Context swtich
+
                 }
             }
             break;
@@ -1067,8 +1111,18 @@ void shell()
         {
             getData(SVC_REBOOT, &data);
         }
-        else if(isCommand(&data, "ps" , 0))
+        else if(isCommand(&data, "ps" , 1))
         {
+            if(!isFieldString(&data, 1))
+                continue;
+
+            getData(SVC_PS, &data);
+            putsUart0("Name\t\t\tPID\t\t\tCPU%%\n");
+            putsUart0(getFieldString(&data, 1));
+            putsUart0("\t\t\t");
+            putiUart0(data.value);
+            putsUart0("\t\t\t");
+            putsUart0("Place Holder\n");
 
         }
         else if(isCommand(&data, "ipcs" , 0))
@@ -1137,6 +1191,7 @@ void shell()
                 continue;
             restartThread(getFieldString(&data, 1));
         }
+        data.value = 0;
     }
 
 }
@@ -1174,10 +1229,10 @@ int main(void)
     ok =  createThread(idle, "idle", 7, 1024);
 
     // Add other processes
-    ok &= createThread(lengthyFn, "lengthyFn", 6, 1024);
-    ok &= createThread(flash4Hz, "flash4Hz", 4, 1024);
-    ok &= createThread(oneshot, "oneShot", 2, 1024);
-    ok &= createThread(readKeys, "readKeys", 6, 1024);
+    ok &= createThread(lengthyFn, "lengthyfn", 6, 1024);
+    ok &= createThread(flash4Hz, "flash4hz", 4, 1024);
+    ok &= createThread(oneshot, "oneshot", 2, 1024);
+    ok &= createThread(readKeys, "readkeys", 6, 1024);
     ok &= createThread(debounce, "debounce", 6, 1024);
     ok &= createThread(important, "important", 0, 1024);
     ok &= createThread(uncooperative, "uncoop", 6, 1024);
