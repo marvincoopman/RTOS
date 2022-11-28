@@ -30,10 +30,12 @@
 typedef struct _USER_DATA
 {
     char buffer[MAX_CHARS+1];
+    char shellOutput[MAX_CHARS+1];
     uint8_t fieldCount;
     uint8_t fieldPosition[MAX_FIELDS];
     char fieldType[MAX_FIELDS]; //n = number a = alpha f = float
     uint32_t value;
+    uint8_t savedIndex;
 } USER_DATA;
 
 //-----------------------------------------------------------------------------

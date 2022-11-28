@@ -54,7 +54,7 @@
 #define RED_LED    PORTE,0 // off-board red LED
 #define GREEN_LED  PORTA,4 // off-board green LED
 #define YELLOW_LED PORTA,3 // off-board yellow LED
-#define ORANGE_LED PORTA,2 // off-board orange LED
+#define ORANGE_LED PORTB,6 // off-board orange LED
 #define PUSHBUTTON0              PORTD,6
 #define PUSHBUTTON1              PORTD,7
 #define PUSHBUTTON2              PORTC,5
@@ -273,6 +273,11 @@ void initRtos()
         tcb[i].state = STATE_INVALID;
         tcb[i].pid = 0;
     }
+    for(i = 0; i < 32; i++)
+    {
+        memoryBlocks[i].ownership = -1;
+        memoryBlocks[i].allocationType = ALLOCATION_EMPTY;
+    }
 }
 
 // REQUIRED: Implement prioritization to 8 levels
@@ -365,7 +370,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
 }
 
 // REQUIRED: modify this function to restart a thread
-void restartThread(char *func)
+bool restartThread(char *func)
 {
     __asm(" SVC #18");
 }
@@ -373,7 +378,7 @@ void restartThread(char *func)
 // REQUIRED: modify this function to stop a thread
 // REQUIRED: remove any pending semaphore waiting
 // NOTE: see notes in class for strategies on whether stack is freed or not
-void stopThread(_fn fn)
+bool stopThread(_fn fn)
 {
     __asm(" SVC #17");
 }
@@ -638,7 +643,83 @@ void svCallIsr()
         {
             // Function\t\t\tAddress\t\t\tSize\t\t\tStack/Heap
             USER_DATA *data = (USER_DATA *) *(psp + 1);
+            uint8_t i = 0;
+            bool ok = false;
+            uint32_t requestedPid = getFieldInteger(data, 1);
 
+            while(!ok && i < taskCount)
+            {
+                if ((uint32_t *) tcb[i].pid == requestedPid)
+                    break;
+                i++;
+            }
+            if(i == taskCount)
+            {
+                pushPSPRegisterOffset(OFFSET_R0, 1); // Pid not found
+                break;
+            }
+            if(data->savedIndex == 0)
+                data->savedIndex = 5;
+
+            uint8_t j = 0;
+            uint8_t allocationType = ALLOCATION_EMPTY;
+            while(data->savedIndex < 32)
+            {
+                if(memoryBlocks[data->savedIndex].ownership == i)
+                {
+                    allocationType = memoryBlocks[data->savedIndex].allocationType;
+                    j++;
+                }
+                else if(j != 0 || (allocationType != memoryBlocks[data->savedIndex].allocationType && j != 0))
+                {
+                    data->savedIndex++;
+                    data->value = j;
+                    if(allocationType == ALLOCATION_STACK)
+                    {
+                        data->shellOutput[0] = 'S';
+                        data->shellOutput[1] = 't';
+                        data->shellOutput[2] = 'a';
+                        data->shellOutput[3] = 'c';
+                        data->shellOutput[4] = 'k';
+                        data->shellOutput[5] = 0;
+                    }
+                    else
+                    {
+                        data->shellOutput[0] = 'H';
+                        data->shellOutput[1] = 'e';
+                        data->shellOutput[2] = 'a';
+                        data->shellOutput[3] = 'p';
+                        data->shellOutput[4] = 0;
+                    }
+                    break;
+                }
+                data->savedIndex++;
+            }
+            if(j != 0 && data->savedIndex == 32)
+            {
+                data->value = j;
+                if(allocationType == ALLOCATION_STACK)
+                {
+                    data->shellOutput[0] = 'S';
+                    data->shellOutput[1] = 't';
+                    data->shellOutput[2] = 'a';
+                    data->shellOutput[3] = 'c';
+                    data->shellOutput[4] = 'k';
+                    data->shellOutput[5] = 0;
+                }
+                else
+                {
+                    data->shellOutput[0] = 'H';
+                    data->shellOutput[1] = 'e';
+                    data->shellOutput[2] = 'a';
+                    data->shellOutput[3] = 'p';
+                    data->shellOutput[4] = 0;
+                }
+                ok = true;
+                data->savedIndex++;
+            }
+            ok = data->savedIndex >= 32;
+            pushPSPRegisterOffset(OFFSET_R0, ok); // Hasnt traversed the entire memoryBlock
             break;
         }
         case SVC_PIDOF:
@@ -652,7 +733,7 @@ void svCallIsr()
                 {
                     if(tcb[i].state == STATE_INVALID)
                         break;
-                    data->value = (uint32_t)tcb[i].pid;
+                    data->value= (uint32_t)tcb[i].pid;
                     ok = true;
                     break;
                 }
@@ -664,8 +745,8 @@ void svCallIsr()
         case SVC_IPCS:
         {
             USER_DATA *data = (USER_DATA *) *(psp + 1);
-            if(data->savedIndex == 0)
-                data->savedIndex = 1;
+            if(data->savedIndex== 0)
+                data->savedIndex= 1;
             bool ok = false;
             uint8_t i = 0;
             uint8_t j = 0;
@@ -692,7 +773,7 @@ void svCallIsr()
 
             data->shellOutput[i] = 0; // Null Character
             data->savedIndex++;
-            if(data->savedIndex == MAX_SEMAPHORES)
+            if(data->savedIndex== MAX_SEMAPHORES)
                 pushPSPRegisterOffset(OFFSET_R0, 1); // Done sending data
             else
                 pushPSPRegisterOffset(OFFSET_R0, 0); // Not done sending data
@@ -701,13 +782,13 @@ void svCallIsr()
         case SVC_PREEMPT:
         {
             USER_DATA *data = (USER_DATA *) *(psp + 1);
-            preemption = data->value;
+            preemption = data->value ;
             break;
         }
         case SVC_PRIORITY:
         {
             USER_DATA *data = (USER_DATA *) *(psp + 1);
-            priority = data->value;
+            priority = data->value ;
             break;
         }
         case SVC_REBOOT:
@@ -725,7 +806,7 @@ void svCallIsr()
                 {
                     if(tcb[i].state == STATE_INVALID)
                         break;
-                    data->value = (uint32_t)tcb[i].pid;
+                    data->value= (uint32_t)tcb[i].pid;
                     ok = true;
                     break;
                 }
@@ -736,6 +817,7 @@ void svCallIsr()
         }
         case SVC_STOP:
         {
+            bool ok = false;
             for(i = 0; i < taskCount; i++)
             {
                 if ((uint32_t *) tcb[i].pid == *psp)
@@ -780,15 +862,17 @@ void svCallIsr()
                     }
                     tcb[i].state = STATE_INVALID;
                     freeMemoryBlocks(tcb[i].srd);
-                    NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Context swtich
-
+                    ok = true;
+                    NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Context switch
                 }
             }
+            pushPSPRegisterOffset(OFFSET_R0, ok); // Restart successful
             break;
         }
         case SVC_RESTART:
         {
             char *func = *psp;
+            bool ok = false;
             for(i = 0; i < taskCount; i++)
             {
                 if(stringCompare(func, tcb[i].name))
@@ -796,9 +880,11 @@ void svCallIsr()
                     tcb[i].priority = tcb[i].priorityInit;
                     tcb[i].sp = tcb[i].spInit;
                     tcb[i].state = STATE_UNRUN;
+                    ok = true;
                     NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Context swtich
                 }
             }
+            pushPSPRegisterOffset(OFFSET_R0, ok); // Restart successful
             break;
         }
     }
@@ -872,6 +958,7 @@ void initHw()
     NVIC_SYS_HND_CTRL_R |= NVIC_SYS_HND_CTRL_USAGE | NVIC_SYS_HND_CTRL_MEM | NVIC_SYS_HND_CTRL_BUS;
 
     enablePort(PORTA);
+    enablePort(PORTB);
     enablePort(PORTC);
     enablePort(PORTD);
     enablePort(PORTE);
@@ -1141,7 +1228,7 @@ void shell()
     USER_DATA data;
     bool ok = false;
     data.value = 0;
-    data.savedIndex = 0;
+    data.savedIndex= 0;
     while (true)
     {
         getsUart0(&data);
@@ -1182,7 +1269,15 @@ void shell()
         {
             if(!isFieldInteger(&data, 1))
                 continue;
-            stopThread(getFieldInteger(&data, 1));
+            if(stopThread(getFieldInteger(&data, 1)))
+            {
+                putsUart0("Stopped ");
+                putsUart0(getFieldString(&data, 1));
+                putsUart0("\n");
+
+            }
+            else
+                putsUart0("Invalid PID\n");
         }
         else if(isCommand(&data, "pmap" , 1))
         {
@@ -1192,9 +1287,18 @@ void shell()
             putsUart0("Name\t\t\tAddress\t\t\tSize\t\t\tStack/Heap\n");
             while(!ok)
             {
+                data.value = 0;
                 ok = getData(SVC_PMAP, &data);
+                if(data.value == 0)
+                    continue;
+                putsUart0("Name\t\t\t");
+                putxUart0(SRAMBOTADDR + (((data.savedIndex - data.value) - 1) * 1024));
+                putsUart0("\t\t\t");
+                putiUart0(data.value * 1024);
+                putsUart0("\t\t\t");
+                putsUart0(data.shellOutput);
+                putcUart0('\n');
             }
-            putsUart0(data.buffer);
         }
         else if(isCommand(&data, "preempt" , 1))
         {
@@ -1204,11 +1308,13 @@ void shell()
             {
                 data.value = 1;
                 getData(SVC_PREEMPT, &data);
+                putsUart0("Preemption on");
             }
             else if(stringCompare(getFieldString(&data, 1), "off"))
             {
                 data.value = 0;
                 getData(SVC_PREEMPT, &data);
+                putsUart0("Preemption off");
             }
         }
         else if(isCommand(&data, "sched" , 1))
@@ -1233,8 +1339,6 @@ void shell()
             if(!isFieldString(&data, 1))
                 continue;
 
-
-
             if(!getData(SVC_PIDOF, &data))
             {
                 putsUart0("Invalid function name\n");
@@ -1250,10 +1354,17 @@ void shell()
         {
             if(!isFieldString(&data, 1))
                 continue;
-            restartThread(getFieldString(&data, 1));
+            if(restartThread(getFieldString(&data, 1)))
+            {
+                putsUart0("Restarted ");
+                putsUart0(getFieldString(&data, 1));
+                putcUart0('\n');
+            }
+            else
+                putsUart0("Invalid function name\n");
         }
         data.value = 0;
-        data.savedIndex = 0;
+        data.savedIndex= 0;
         ok = false;
     }
 

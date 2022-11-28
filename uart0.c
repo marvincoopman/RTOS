@@ -20,9 +20,9 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "../Lab 7/tm4c123gh6pm.h"
-#include "../Lab 7/uart0.h"
-#include "../Lab 7/gpio.h"
+#include "tm4c123gh6pm.h"
+#include "uart0.h"
+#include "gpio.h"
 
 // Pins
 #define UART_TX PORTA,1
