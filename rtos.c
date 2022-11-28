@@ -101,7 +101,7 @@ semaphore semaphores[MAX_SEMAPHORES];
 uint8_t taskCurrent = 0;   // index of last dispatched task //HINT: taskCurrent <-- sched \n fn = task[taskCurrent].pfn \n *fn(); setPSP and setTMPL
 uint8_t taskCount = 0;     // total number of valid tasks
 bool priority = true;
-bool preemption = false;
+bool preemption = true;
 
 
 // REQUIRED: add store and management for the memory used by the thread stacks
@@ -800,19 +800,28 @@ void svCallIsr()
             bool ok = false;
             USER_DATA *data = (USER_DATA *) *(psp + 1);
             uint8_t i = 0;
-            while(!ok && i < taskCount)
+            while(tcb[data->savedIndex].state == STATE_INVALID)
             {
-                if((ok = stringCompare(getFieldString(data, 1), tcb[i].name)))
+                data->savedIndex++;
+                if(data->savedIndex == taskCount)
                 {
-                    if(tcb[i].state == STATE_INVALID)
-                        break;
-                    data->value= (uint32_t)tcb[i].pid;
                     ok = true;
                     break;
                 }
-                i++;
             }
-            pushPSPRegisterOffset(OFFSET_R0, ok); // Invalid name
+            if(data->savedIndex != taskCount)
+            {
+                while(tcb[data->savedIndex].name[i] != 0)
+                {
+                    data->shellOutput[i] = tcb[data->savedIndex].name[i];
+                    i++;
+                }
+                data->shellOutput[i] = 0;
+                data->value= (uint32_t)tcb[i].pid;
+            }
+            data->savedIndex++;
+            ok = data->savedIndex == taskCount;
+            pushPSPRegisterOffset(OFFSET_R0, ok); // False = needs more data
             break;
         }
         case SVC_STOP:
@@ -1237,22 +1246,19 @@ void shell()
         {
             getData(SVC_REBOOT, &data);
         }
-        else if(isCommand(&data, "ps" , 1))
+        else if(isCommand(&data, "ps" , 0))
         {
-            if(!isFieldString(&data, 1))
-                continue;
 
-            if(!getData(SVC_PS, &data))
-            {
-                putsUart0("Invalid function name\n");
-                continue;
-            }
             putsUart0("Name\t\t\tPID\t\t\tCPU%%\n");
-            putsUart0(getFieldString(&data, 1));
-            putsUart0("\t\t\t");
-            putiUart0(data.value);
-            putsUart0("\t\t\t");
-            putsUart0("Place Holder\n");
+            while(!getData(SVC_PS, &data))
+            {
+                putsUart0(data.shellOutput);
+                putsUart0("\t\t\t");
+                putiUart0(data.value);
+                putsUart0("\t\t\t");
+                putsUart0("Place Holder\n");
+                yield();
+            }
 
         }
         else if(isCommand(&data, "ipcs" , 0))
@@ -1263,6 +1269,7 @@ void shell()
                 ok = getData(SVC_IPCS, &data);
                 putsUart0(data.shellOutput);
                 putcUart0('\n');
+                yield();
             }
         }
         else if(isCommand(&data, "kill" , 1))
@@ -1298,6 +1305,7 @@ void shell()
                 putsUart0("\t\t\t");
                 putsUart0(data.shellOutput);
                 putcUart0('\n');
+                yield();
             }
         }
         else if(isCommand(&data, "preempt" , 1))
