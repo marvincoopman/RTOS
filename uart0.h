@@ -35,6 +35,7 @@ typedef struct _USER_DATA
     uint8_t fieldPosition[MAX_FIELDS];
     char fieldType[MAX_FIELDS]; //n = number a = alpha f = float
     uint32_t value;
+    uint32_t time;
     uint8_t savedIndex;
 } USER_DATA;
 
@@ -49,6 +50,7 @@ void putcUart0(char c);
 void putsUart0(char* str);
 void putiUart0(uint32_t num);
 void putxUart0(uint32_t num);
+void putpUart0(uint32_t num);
 char getcUart0(void);
 void getsUart0(USER_DATA *data);
 void parseFields(USER_DATA *data);

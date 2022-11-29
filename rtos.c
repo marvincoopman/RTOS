@@ -1,9 +1,5 @@
 // RTOS Framework - Fall 2022
-// J Losh
-
-// Student Name:
 // Marvin Coopman
-// Please do not change any function name in this code or the thread priorities
 
 //-----------------------------------------------------------------------------
 // Hardware Target
@@ -102,10 +98,8 @@ uint8_t taskCurrent = 0;   // index of last dispatched task //HINT: taskCurrent 
 uint8_t taskCount = 0;     // total number of valid tasks
 bool priority = true;
 bool preemption = true;
-
-
-// REQUIRED: add store and management for the memory used by the thread stacks
-//           thread stacks must start on 1 kiB boundaries so mpu can work correctly
+uint8_t wr_index = 0;
+uint32_t totalTime[2] = 0;
 
 struct _tcb
 {
@@ -120,6 +114,7 @@ struct _tcb
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
     int8_t hasSemaphore;           // Pointer to the semaphore process is using
+    uint32_t time[2];                 // Time spent in process
 } tcb[MAX_TASKS];
 
 struct _memoryBlocks
@@ -159,7 +154,6 @@ uint32_t *heapBotPtr = 0x20002000;
 // Memory Manager and MPU Funcitons
 //-----------------------------------------------------------------------------
 
-// TODO: add your malloc code here and update the SRD bits for the current thread
 void * mallocFromHeap(uint32_t size_in_bytes)
 {
     __asm(" SVC #6");
@@ -171,11 +165,8 @@ void * allocaFromHeap(uint32_t size_in_bytes)
     if(size_in_bytes == 0)
         return 0;
 
-//    if(heapTopPtr - heapBotPtr < size_in_bytes)
-//        return 0;
 
     void *temp = (void *)((uint8_t *)heapBotPtr - 1);
-//    putxUart0((uint32_t)(heapBotPtr - 1));
     heapBotPtr += (((size_in_bytes - 1) / 1024) + 1) * (1024 / 4);
     return temp;
 }
@@ -285,7 +276,6 @@ void initRtos()
 // REQUIRED: Implement prioritization to 8 levels
 int rtosScheduler()
 {
-
     bool ok;
     static uint8_t task = 0xFF;
     static uint8_t priorityTaskCurrent[MAX_PRIORITIES] = {0};
@@ -511,8 +501,22 @@ void systickIsr()
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
-    // Push regs -> psp
-    pushToPSPStack();
+    WTIMER0_CTL_R &= ~TIMER_CTL_TAEN;
+    if(totalTime[wr_index] + WTIMER0_TAV_R < 0xFFFFFFFF)
+    {
+        tcb[taskCurrent].time[wr_index] += WTIMER0_TAV_R;
+        totalTime += WTIMER0_TAV_R;
+    }
+    else
+    {
+        uint8_t i;
+        wr_index = 1 - wr_index;
+        for(i = 0; i < taskCount; i++)
+        {
+            tcb[i].time[wr_index] = 0;
+        }
+    }
+    pushToPSPStack();   // Pushes R0 - R3, R11, LR, PC, xPSR
     tcb[taskCurrent].sp = (void *)getPSP();
     taskCurrent = rtosScheduler();
     if(tcb[taskCurrent].state == STATE_READY)
@@ -530,6 +534,7 @@ void pendSvIsr()
         setPSP((uint32_t)tcb[taskCurrent].sp);
         pushDummyPSPStack(0x61000000, (uint32_t *)tcb[taskCurrent].pid);    // Pushing dummy stack R0 -> R3, R11, LR, PC, xPSR
     }
+    WTIMER0_CTL_R |= TIMER_CTL_TAEN;
 }
 
 // REQUIRED: modify this function to add support for the service call
@@ -822,6 +827,7 @@ void svCallIsr()
                 }
                 data->shellOutput[i] = 0;
                 data->value = (uint32_t)tcb[data->savedIndex].pid;
+                data->time = (tcb[data->savedIndex].time[1 - wr_index] * 10000) / totalTime;
             }
             data->savedIndex++;
             ok = data->savedIndex == taskCount;
@@ -1288,6 +1294,7 @@ void shell()
         parseFields(&data);
         if(isCommand(&data, "reboot" , 0))
         {
+            putsUart0("Rebooting . . .\n\n");
             getData(SVC_REBOOT, &data);
         }
         else if(isCommand(&data, "ps" , 0))
@@ -1300,8 +1307,7 @@ void shell()
                 putsUart0("\t\t\t");
                 putiUart0(data.value);
                 putsUart0("\t\t\t");
-                putsUart0("Place Holder\n");
-                yield();
+                putpUart0(data.time);
             }
 
         }
@@ -1318,7 +1324,10 @@ void shell()
         else if(isCommand(&data, "kill" , 1))
         {
             if(!isFieldInteger(&data, 1))
+            {
+                putsUart0("Invalid command: kill PID\n");
                 continue;
+            }
             if(stopThread(getFieldInteger(&data, 1)))
             {
                 putsUart0("Stopped ");
@@ -1332,7 +1341,10 @@ void shell()
         else if(isCommand(&data, "pmap" , 1))
         {
             if(!isFieldInteger(&data, 1))
+            {
+                putsUart0("Invalid command: pmap PID\n");
                 continue;
+            }
 
             putsUart0("Name\t\t\tAddress\t\t\tSize\t\t\tStack/Heap\n");
             while(!ok)
@@ -1340,7 +1352,10 @@ void shell()
                 data.value = 0;
                 ok = getData(SVC_PMAP, &data);
                 if(data.value == 0)
+                {
+                    putsUart0("Invalid function name\n");
                     continue;
+                }
                 putsUart0("Name\t\t\t");
                 putxUart0(SRAMBOTADDR + (((data.savedIndex - data.value) - 1) * 1024));
                 putsUart0("\t\t\t");
@@ -1348,13 +1363,15 @@ void shell()
                 putsUart0("\t\t\t");
                 putsUart0(data.shellOutput);
                 putcUart0('\n');
-                yield();
             }
         }
         else if(isCommand(&data, "preempt" , 1))
         {
             if(!isFieldString(&data, 1))
+            {
+                putsUart0("Invalid command: preempt ON|OFF\n");
                 continue;
+            }
             if(stringCompare(getFieldString(&data, 1), "on"))
             {
                 data.value = 1;
@@ -1371,7 +1388,11 @@ void shell()
         else if(isCommand(&data, "sched" , 1))
         {
             if(!isFieldString(&data, 1))
+            {
+                putsUart0("Invalid command: sched PRIO|RR\n");
                 continue;
+            }
+
             if(stringCompare(getFieldString(&data, 1), "prio"))
             {
                 data.value = 1;
@@ -1388,7 +1409,10 @@ void shell()
         else if(isCommand(&data, "pidof" , 1))
         {
             if(!isFieldString(&data, 1))
+            {
+                putsUart0("Invalid command: pidof <Process_Name>\n");
                 continue;
+            }
 
             if(!getData(SVC_PIDOF, &data))
             {
@@ -1404,7 +1428,10 @@ void shell()
         else if(isCommand(&data, "run" , 1))
         {
             if(!isFieldString(&data, 1))
+            {
+                putsUart0("Invalid command: run <Process_Name>\n");
                 continue;
+            }
             if(restartThread(getFieldString(&data, 1)))
             {
                 putsUart0("Restarted ");
@@ -1412,7 +1439,7 @@ void shell()
                 putcUart0('\n');
             }
             else
-                putsUart0("Invalid function name\n");
+                putsUart0("Function already running or function does not exist\n");
         }
         data.value = 0;
         data.savedIndex= 0;
