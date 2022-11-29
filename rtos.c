@@ -541,7 +541,6 @@ void pendSvIsr()
 // REQUIRED: in preemptive code, add code to handle synchronization primitives
 void svCallIsr()
 {
-    static uint8_t i, j;
     uint32_t *psp = getPSP();
     uint16_t *pc = *(psp + 6);
     uint8_t value = (*(pc - 1) & 0xFF); // Extracts SVC Number
@@ -1440,6 +1439,19 @@ void shell()
             }
             else
                 putsUart0("Function already running or function does not exist\n");
+        }
+        else if(isCommand(&data, "help" , 0))
+        {
+            putsUart0("ps: The PID id, process (actually thread) name, and % of CPU time should be stored at a minimum.\n\n"
+                      "ipcs: Displays semaphore usage.\n\n"
+                      "kill <PID>: This command allows a task to be killed, by referencing the process ID.\n\n"
+                      "reboot: The command Restarted the processor.\n\n"
+                      "pidof <Process_Name>: Returns the PID of a task.\n\n"
+                      "run <Process_Name>: Starts a task running in the background if not already running. Only one instance of\n"
+                      "a named task is allowed. \n\n"
+                      "pmap PID: Displays memory usage by the process (thread) with the matching PID.\n\n"
+                      "preempt ON|OFF: Turns preemption on or off. The default is preemption on.\n\n"
+                      "sched PRIO|RR: Selectes priority or round-robin scheduling. The default is priority scheduling.\n\n");
         }
         data.value = 0;
         data.savedIndex= 0;
