@@ -174,8 +174,8 @@ void * allocaFromHeap(uint32_t size_in_bytes)
 //    if(heapTopPtr - heapBotPtr < size_in_bytes)
 //        return 0;
 
-    void *temp = (void *)heapBotPtr;
-    putxUart0((uint32_t)heapBotPtr);
+    void *temp = (void *)((uint8_t *)heapBotPtr - 1);
+//    putxUart0((uint32_t)(heapBotPtr - 1));
     heapBotPtr += (((size_in_bytes - 1) / 1024) + 1) * (1024 / 4);
     return temp;
 }
@@ -218,7 +218,7 @@ void setupSramAccess(void)
 
 void setSramAccessWindow(uint32_t mask)
 {
-    mask |= 0x1F;
+//    mask |= 0x1F;
     // SRAM region 0
     NVIC_MPU_BASE_R = 0x20000013;
     NVIC_MPU_ATTR_R = 0x11060019 | ((mask << 8) & 0xFF00);
@@ -244,8 +244,10 @@ uint32_t getSramSRD(uint32_t baseAdd, uint32_t size_in_bytes)
         return;
 
     uint8_t numberOfSubregions = ((size_in_bytes - 1) / 1024);
-    uint32_t currentSubregion = (baseAdd - 0x20000000) / 1024;
+    uint32_t currentSubregion = (baseAdd - SRAMBOTADDR) / 1024;
     uint32_t mask = ((2 * (1 << numberOfSubregions)) - 1) << currentSubregion;
+    putxUart0(mask);
+    putcUart0('\n');
     return mask;
 }
 // REQUIRED: initialize MPU here
@@ -283,7 +285,7 @@ void initRtos()
 // REQUIRED: Implement prioritization to 8 levels
 int rtosScheduler()
 {
-//    WTIMER0_
+
     bool ok;
     static uint8_t task = 0xFF;
     static uint8_t priorityTaskCurrent[MAX_PRIORITIES] = {0};
@@ -348,6 +350,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].state = STATE_UNRUN;
             tcb[i].pid = fn;
             tcb[i].sp = allocaFromHeap(stackBytes);   // HINT: ACTIVE SP (0 if function is inactive)
+            putxUart0((uint32_t)(tcb[i].sp));
             tcb[i].spInit = tcb[i].sp;                      // HINT: Top of the stack (backup copy of SP should be result of malloc)
             tcb[i].priorityInit = priority;
             tcb[i].priority = priority;
@@ -405,6 +408,20 @@ bool createSemaphore(uint8_t semaphore, uint8_t count, const char name[])
     return ok;
 }
 
+void tempStart()
+{
+    _fn fn = tcb[taskCurrent].pid;
+    tcb[taskCurrent].state = STATE_READY;
+    setSramAccessWindow(tcb[taskCurrent].srd);
+    // Systick configuration
+    NVIC_ST_RELOAD_R =  39999; // 1ms
+    NVIC_ST_CTRL_R |= NVIC_ST_CTRL_ENABLE | NVIC_ST_CTRL_INTEN | NVIC_ST_CTRL_CLK_SRC;
+    NVIC_MPU_CTRL_R = NVIC_MPU_CTRL_ENABLE;
+    WTIMER0_CTL_R |= TIMER_CTL_TAEN;
+    removePriv();
+    fn();
+}
+
 // REQUIRED: modify this function to start the operating system
 // by calling scheduler, setting PSP, ASP bit, TMPL bit, and PC
 void startRtos()
@@ -413,15 +430,10 @@ void startRtos()
     uint32_t sp = (uint32_t)tcb[taskCurrent].sp;
     setPSP(sp);
     setASP();
-    _fn fn = tcb[taskCurrent].pid;
-    tcb[taskCurrent].state = STATE_READY;
-    setSramAccessWindow(tcb[taskCurrent].srd);
-    // Systick configuration
-    NVIC_ST_RELOAD_R =  39999; // 1ms
-    NVIC_ST_CTRL_R |= NVIC_ST_CTRL_ENABLE | NVIC_ST_CTRL_INTEN | NVIC_ST_CTRL_CLK_SRC;
-    removePriv();
-    fn();
+    tempStart();
 }
+
+
 
 // REQUIRED: modify this function to yield execution back to scheduler using pendsv
 void yield()
@@ -492,10 +504,6 @@ void systickIsr()
     {
         NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
     }
-
-    // Ping Pong
-
-
 }
 
 
@@ -517,14 +525,10 @@ void pendSvIsr()
     }
     else
     {
-        // Step 10
         tcb[taskCurrent].state = STATE_READY;
         setSramAccessWindow(tcb[taskCurrent].srd);
         setPSP((uint32_t)tcb[taskCurrent].sp);
-        pushDummyPSPStack(0x61000000, (uint32_t *)tcb[taskCurrent].pid);
-        // Ensure PC and xPSR are correct
-        // PC <- tcb[taskCurrent].sp;
-        // xPSR <- research valid values upper 4 bits are ALU 24th bit is important
+        pushDummyPSPStack(0x61000000, (uint32_t *)tcb[taskCurrent].pid);    // Pushing dummy stack R0 -> R3, R11, LR, PC, xPSR
     }
 }
 
@@ -733,7 +737,7 @@ void svCallIsr()
                 {
                     if(tcb[i].state == STATE_INVALID)
                         break;
-                    data->value= (uint32_t)tcb[i].pid;
+                    data->value = (uint32_t)tcb[i].pid;
                     ok = true;
                     break;
                 }
@@ -817,7 +821,7 @@ void svCallIsr()
                     i++;
                 }
                 data->shellOutput[i] = 0;
-                data->value= (uint32_t)tcb[i].pid;
+                data->value = (uint32_t)tcb[data->savedIndex].pid;
             }
             data->savedIndex++;
             ok = data->savedIndex == taskCount;
@@ -884,7 +888,7 @@ void svCallIsr()
             bool ok = false;
             for(i = 0; i < taskCount; i++)
             {
-                if(stringCompare(func, tcb[i].name))
+                if(stringCompare(func, tcb[i].name) && tcb[i].state == STATE_INVALID)
                 {
                     tcb[i].priority = tcb[i].priorityInit;
                     tcb[i].sp = tcb[i].spInit;
@@ -902,7 +906,7 @@ void svCallIsr()
 void mpuFaultIsr()
 {
     putsUart0("MPU fault in process ");
-    putiUart0((int32_t)tcb[taskCurrent].pid);
+    putiUart0(taskCurrent);
     putsUart0("\n");
     putsUart0("MFault flags:\t\t");
     putxUart0(NVIC_FAULT_STAT_R & 0xF); // Prints mfault flags bits 7-0(NVIC_FAULT_STAT_R[7:0])
@@ -922,7 +926,48 @@ void mpuFaultIsr()
         putxUart0(NVIC_FAULT_ADDR_R);
         putsUart0("\n");
     }
+    
+    if(tcb[taskCurrent].state == STATE_BLOCKED)
+    {
+        // Remove process from process queue
+        uint8_t j;
+        for(j = 0; j < ((semaphore *)(tcb[taskCurrent].semaphore))->queueSize; j++)
+        {
+            if (((semaphore *) (tcb[taskCurrent].semaphore))->processQueue[j] == taskCurrent)
+                ((semaphore *) (tcb[taskCurrent].semaphore))->processQueue[j] = 0;
 
+            if(((semaphore *) (tcb[taskCurrent].semaphore))->processQueue[j] == 0)
+            {
+                ((semaphore *) (tcb[taskCurrent].semaphore))->processQueue[j] = ((semaphore *) (tcb[taskCurrent].semaphore))->processQueue[j + 1];
+                ((semaphore *) (tcb[taskCurrent].semaphore))->processQueue[j + 1] = 0;
+            }
+        }
+        tcb[taskCurrent].semaphore = 0;
+        ((semaphore *)(tcb[taskCurrent].semaphore))->queueSize--;
+    }
+    else if(tcb[taskCurrent].state == STATE_DELAYED)
+        tcb[taskCurrent].ticks = 0;
+    else if(tcb[taskCurrent].hasSemaphore != -1)
+    {
+        // Post semaphore
+        semaphores[tcb[taskCurrent].hasSemaphore].count++;
+        if(semaphores[tcb[taskCurrent].hasSemaphore].queueSize > 0)
+        {
+            tcb[semaphores[tcb[taskCurrent].hasSemaphore].processQueue[0]].state = STATE_READY;
+            tcb[semaphores[tcb[taskCurrent].hasSemaphore].processQueue[0]].hasSemaphore = tcb[taskCurrent].hasSemaphore;
+            tcb[semaphores[tcb[taskCurrent].hasSemaphore].processQueue[0]].semaphore = 0;
+            semaphores[tcb[taskCurrent].hasSemaphore].queueSize--;
+            uint8_t j;
+            for(j = 0; j < semaphores[tcb[taskCurrent].hasSemaphore].queueSize; j++)
+            {
+                semaphores[tcb[taskCurrent].hasSemaphore].processQueue[j] = semaphores[tcb[taskCurrent].hasSemaphore].processQueue[j + 1];
+            }
+            semaphores[tcb[taskCurrent].hasSemaphore].count--;
+        }
+        tcb[taskCurrent].hasSemaphore = -1;
+    }
+    tcb[taskCurrent].state = STATE_INVALID;
+    freeMemoryBlocks(tcb[taskCurrent].srd);
     NVIC_SYS_HND_CTRL_R &= ~(NVIC_SYS_HND_CTRL_MEMP); // Clear MPU fault pending bit
     NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV; // Context swtich
 }
@@ -997,13 +1042,12 @@ void initHw()
 
 
 //     Widetimer configuration
-
     SYSCTL_RCGCWTIMER_R |= SYSCTL_RCGCWTIMER_R0;
-    WTIMER0_CTL_R &= ~(TIMER_CTL_TAEN | TIMER_CTL_TBEN);
+    _delay_cycles(3);
+
+    WTIMER0_CTL_R &= ~TIMER_CTL_TAEN;
     WTIMER0_CFG_R = TIMER_CFG_16_BIT;
     WTIMER0_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACMR | TIMER_TAMR_TACDIR;
-    WTIMER0_TBMR_R = TIMER_TBMR_TBMR_PERIOD | TIMER_TBMR_TBCMR | TIMER_TBMR_TBCDIR;
-    WTIMER0_CTL_R |= TIMER_CTL_TAEN | TIMER_CTL_TBEN;
 }
 
 // REQUIRED: add code to return a value from 0-63 indicating which of 6 PBs are pressed
@@ -1162,7 +1206,7 @@ void readKeys()
         }
         if ((buttons & 4) != 0)
         {
-            restartThread(flash4Hz);
+            restartThread("flash4Hz");
         }
         if ((buttons & 8) != 0)
         {
@@ -1269,7 +1313,6 @@ void shell()
                 ok = getData(SVC_IPCS, &data);
                 putsUart0(data.shellOutput);
                 putcUart0('\n');
-                yield();
             }
         }
         else if(isCommand(&data, "kill" , 1))
