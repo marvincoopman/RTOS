@@ -99,6 +99,8 @@ uint8_t taskCount = 0;     // total number of valid tasks
 bool priority = true;
 bool preemption = true;
 uint32_t timeInitial = 0;
+uint8_t wr_index = 0;
+uint32_t totalTime[2];
 
 struct _tcb
 {
@@ -113,7 +115,7 @@ struct _tcb
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
     int8_t hasSemaphore;           // Pointer to the semaphore process is using
-    uint32_t time;                 // Time spent in process
+    uint32_t time[2];                 // Time spent in process
 } tcb[MAX_TASKS];
 
 struct _memoryBlocks
@@ -489,10 +491,12 @@ void systickIsr()
     if(WTIMER0_TAV_R > 80000000)
     {
 //        totalTime = WTIMER0_TAV_R;
+        totalTime[wr_index] = WTIMER0_TAV_R;
+        wr_index = 1 - wr_index;
         WTIMER0_TAV_R = 0;
         timeInitial = 0;
         for(i = 0; i < taskCount; i++)
-            tcb[i].time = 0;
+            tcb[i].time[wr_index] = 0;
     }
     if(preemption)
     {
@@ -506,7 +510,7 @@ void systickIsr()
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
-    tcb[taskCurrent].time += WTIMER0_TAV_R - timeInitial;
+    tcb[taskCurrent].time[wr_index] += WTIMER0_TAV_R - timeInitial;
     pushToPSPStack();   // Pushes R0 - R3, R11, LR, PC, xPSR
     tcb[taskCurrent].sp = (void *)getPSP();
     taskCurrent = rtosScheduler();
@@ -811,7 +815,7 @@ void svCallIsr()
             }
             data->shellOutput[i] = 0;
             data->value = (uint32_t)tcb[data->savedIndex].pid;
-            data->time = (tcb[data->savedIndex].time) / (WTIMER0_TAV_R / 10000);
+            data->time = (tcb[data->savedIndex].time[1 - wr_index]) / (totalTime[1 - wr_index] / 10000);
             data->savedIndex += tcb[data->savedIndex].state * 100;
 
             data->savedIndex++;
@@ -1159,7 +1163,6 @@ void lengthyFn()
     // Example of allocating memory from stack
     // This will show up in the pmap command for this thread
     p = mallocFromHeap(1024);
-    putxUart0(p);
     *p = 0;
 
     while(true)
