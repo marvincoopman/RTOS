@@ -149,9 +149,36 @@ void putxUart0(uint32_t num)
 
 void putpUart0(uint32_t num)
 {
-    putiUart0(num / 100);
-    putcUart0('.');
-    putiUart0(num % 100);
+    if(num == 0)
+    {
+        putcUart0('0');
+        return;
+    }
+
+    uint32_t factor = 1;
+    uint32_t temp = num;
+    char digit = '0';
+    while(temp > 9)
+    {
+        temp /= 10;
+        factor *= 10;
+    }
+    if(factor < 10)
+    {
+        putcUart0('.');
+        if(factor == 1)
+            putcUart0('0');
+    }
+    while(factor > 0)
+    {
+        if(factor == 10)
+            putcUart0('.');
+        digit = (num / factor) + '0';
+        putcUart0(digit);
+        num %= factor;
+        factor /= 10;
+    }
+    putcUart0('%');
 }
 // Blocking function that returns with serial data once the buffer is not empty
 char getcUart0(void)

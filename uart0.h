@@ -36,7 +36,7 @@ typedef struct _USER_DATA
     char fieldType[MAX_FIELDS]; //n = number a = alpha f = float
     uint32_t value;
     uint32_t time;
-    uint8_t savedIndex;
+    uint16_t savedIndex;
 } USER_DATA;
 
 //-----------------------------------------------------------------------------

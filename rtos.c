@@ -98,8 +98,7 @@ uint8_t taskCurrent = 0;   // index of last dispatched task //HINT: taskCurrent 
 uint8_t taskCount = 0;     // total number of valid tasks
 bool priority = true;
 bool preemption = true;
-uint8_t wr_index = 0;
-uint32_t totalTime[2] = 0;
+uint32_t timeInitial = 0;
 
 struct _tcb
 {
@@ -114,7 +113,7 @@ struct _tcb
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
     int8_t hasSemaphore;           // Pointer to the semaphore process is using
-    uint32_t time[2];                 // Time spent in process
+    uint32_t time;                 // Time spent in process
 } tcb[MAX_TASKS];
 
 struct _memoryBlocks
@@ -237,8 +236,6 @@ uint32_t getSramSRD(uint32_t baseAdd, uint32_t size_in_bytes)
     uint8_t numberOfSubregions = ((size_in_bytes - 1) / 1024);
     uint32_t currentSubregion = (baseAdd - SRAMBOTADDR) / 1024;
     uint32_t mask = ((2 * (1 << numberOfSubregions)) - 1) << currentSubregion;
-    putxUart0(mask);
-    putcUart0('\n');
     return mask;
 }
 // REQUIRED: initialize MPU here
@@ -340,7 +337,6 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].state = STATE_UNRUN;
             tcb[i].pid = fn;
             tcb[i].sp = allocaFromHeap(stackBytes);   // HINT: ACTIVE SP (0 if function is inactive)
-            putxUart0((uint32_t)(tcb[i].sp));
             tcb[i].spInit = tcb[i].sp;                      // HINT: Top of the stack (backup copy of SP should be result of malloc)
             tcb[i].priorityInit = priority;
             tcb[i].priority = priority;
@@ -490,10 +486,19 @@ void systickIsr()
                 tcb[i].state = STATE_READY;
         }
     }
+    if(WTIMER0_TAV_R > 80000000)
+    {
+//        totalTime = WTIMER0_TAV_R;
+        WTIMER0_TAV_R = 0;
+        timeInitial = 0;
+        for(i = 0; i < taskCount; i++)
+            tcb[i].time = 0;
+    }
     if(preemption)
     {
         NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
     }
+
 }
 
 
@@ -501,21 +506,7 @@ void systickIsr()
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
-    WTIMER0_CTL_R &= ~TIMER_CTL_TAEN;
-    if(totalTime[wr_index] + WTIMER0_TAV_R < 0xFFFFFFFF)
-    {
-        tcb[taskCurrent].time[wr_index] += WTIMER0_TAV_R;
-        totalTime += WTIMER0_TAV_R;
-    }
-    else
-    {
-        uint8_t i;
-        wr_index = 1 - wr_index;
-        for(i = 0; i < taskCount; i++)
-        {
-            tcb[i].time[wr_index] = 0;
-        }
-    }
+    tcb[taskCurrent].time += WTIMER0_TAV_R - timeInitial;
     pushToPSPStack();   // Pushes R0 - R3, R11, LR, PC, xPSR
     tcb[taskCurrent].sp = (void *)getPSP();
     taskCurrent = rtosScheduler();
@@ -534,7 +525,7 @@ void pendSvIsr()
         setPSP((uint32_t)tcb[taskCurrent].sp);
         pushDummyPSPStack(0x61000000, (uint32_t *)tcb[taskCurrent].pid);    // Pushing dummy stack R0 -> R3, R11, LR, PC, xPSR
     }
-    WTIMER0_CTL_R |= TIMER_CTL_TAEN;
+    timeInitial = WTIMER0_TAV_R;
 }
 
 // REQUIRED: modify this function to add support for the service call
@@ -607,8 +598,8 @@ void svCallIsr()
             if(*psp == 0)
                 break;
 
-            i = 32;
-            j = ((*psp - 1) / 1024) + 1;
+            uint8_t i = 32;
+            uint32_t j = ((*psp - 1) / 1024) + 1;
             bool ok = false;
             while(!ok)
             {
@@ -629,14 +620,15 @@ void svCallIsr()
                 }
             }
             uint32_t heapTopPtr = (SRAMBOTADDR + (i * 1024));
-            putxUart0(heapTopPtr);
             tcb[taskCurrent].srd |= getSramSRD(heapTopPtr, *psp);
             updateMemoryBlocks(taskCurrent, getSramSRD(heapTopPtr, *psp), ALLOCATION_HEAP);
+            setSramAccessWindow(tcb[taskCurrent].srd);
             pushPSPRegisterOffset(OFFSET_R0, heapTopPtr);
             break;
         }
         case SVC_SETPRIORITY:
         {
+            uint8_t i;
             for(i = 0; i < taskCount; i++)
             {
                 if((uint32_t)tcb[i].pid == *psp)
@@ -808,34 +800,29 @@ void svCallIsr()
             bool ok = false;
             USER_DATA *data = (USER_DATA *) *(psp + 1);
             uint8_t i = 0;
-            while(tcb[data->savedIndex].state == STATE_INVALID)
-            {
+            data->savedIndex = data->savedIndex % 100;
+            while(tcb[data->savedIndex].state == STATE_INVALID && data->savedIndex < taskCount)
                 data->savedIndex++;
-                if(data->savedIndex == taskCount)
-                {
-                    ok = true;
-                    break;
-                }
-            }
-            if(data->savedIndex != taskCount)
+
+            while(tcb[data->savedIndex % 100].name[i] != 0)
             {
-                while(tcb[data->savedIndex].name[i] != 0)
-                {
-                    data->shellOutput[i] = tcb[data->savedIndex].name[i];
-                    i++;
-                }
-                data->shellOutput[i] = 0;
-                data->value = (uint32_t)tcb[data->savedIndex].pid;
-                data->time = (tcb[data->savedIndex].time[1 - wr_index] * 10000) / totalTime;
+                data->shellOutput[i] = tcb[data->savedIndex].name[i];
+                i++;
             }
+            data->shellOutput[i] = 0;
+            data->value = (uint32_t)tcb[data->savedIndex].pid;
+            data->time = (tcb[data->savedIndex].time) / (WTIMER0_TAV_R / 10000);
+            data->savedIndex += tcb[data->savedIndex].state * 100;
+
             data->savedIndex++;
-            ok = data->savedIndex == taskCount;
+            ok = data->savedIndex % 100 == taskCount;
             pushPSPRegisterOffset(OFFSET_R0, ok); // False = needs more data
             break;
         }
         case SVC_STOP:
         {
             bool ok = false;
+            uint8_t i, j;
             for(i = 0; i < taskCount; i++)
             {
                 if ((uint32_t *) tcb[i].pid == *psp)
@@ -891,6 +878,7 @@ void svCallIsr()
         {
             char *func = *psp;
             bool ok = false;
+            uint8_t i;
             for(i = 0; i < taskCount; i++)
             {
                 if(stringCompare(func, tcb[i].name) && tcb[i].state == STATE_INVALID)
@@ -1298,17 +1286,41 @@ void shell()
         }
         else if(isCommand(&data, "ps" , 0))
         {
-
-            putsUart0("Name\t\t\tPID\t\t\tCPU%%\n");
-            while(!getData(SVC_PS, &data))
+            uint32_t totalCpu = 10000;
+            putsUart0("Name\t\t\tPID\t\t\tPriority\t\t\tCPU%%\n");
+            while(!ok)
             {
+                ok = getData(SVC_PS, &data);
                 putsUart0(data.shellOutput);
                 putsUart0("\t\t\t");
                 putiUart0(data.value);
                 putsUart0("\t\t\t");
+                switch(data.savedIndex / 100)
+                {
+                    case STATE_INVALID:
+                        putsUart0("STATE_INVALID");
+                        break;
+                    case STATE_READY:
+                        putsUart0("STATE_READY");
+                        break;
+                    case STATE_BLOCKED:
+                        putsUart0("STATE_BLOCKED");
+                        break;
+                    case STATE_DELAYED:
+                        putsUart0("STATE_DELAYED");
+                        break;
+                    case STATE_UNRUN:
+                        putsUart0("STATE_UNRUN");
+                        break;
+                }
+                putsUart0("\t\t\t");
                 putpUart0(data.time);
+                putcUart0('\n');
+                totalCpu -= data.time;
             }
-
+            putsUart0("Kernel:\t\t\t\t\t\t\t\t\t\t\t");
+            putpUart0(totalCpu);
+            putcUart0('\n');
         }
         else if(isCommand(&data, "ipcs" , 0))
         {
@@ -1352,11 +1364,9 @@ void shell()
                 ok = getData(SVC_PMAP, &data);
                 if(data.value == 0)
                 {
-                    putsUart0("Invalid function name\n");
                     continue;
                 }
                 putsUart0("Name\t\t\t");
-                putxUart0(SRAMBOTADDR + (((data.savedIndex - data.value) - 1) * 1024));
                 putsUart0("\t\t\t");
                 putiUart0(data.value * 1024);
                 putsUart0("\t\t\t");
@@ -1442,14 +1452,14 @@ void shell()
         }
         else if(isCommand(&data, "help" , 0))
         {
-            putsUart0("ps: The PID id, process (actually thread) name, and % of CPU time should be stored at a minimum.\n\n"
+            putsUart0("ps: The PID id, process (actually thread) name, and  of CPU time should be stored at a minimum.\n\n"
                       "ipcs: Displays semaphore usage.\n\n"
-                      "kill <PID>: This command allows a task to be killed, by referencing the process ID.\n\n"
-                      "reboot: The command Restarted the processor.\n\n"
+                      "kill <PID>: This command allows a task to be killed, by referencing the process ID.\n\n");
+            putsUart0("reboot: The command Restarted the processor.\n\n"
                       "pidof <Process_Name>: Returns the PID of a task.\n\n"
                       "run <Process_Name>: Starts a task running in the background if not already running. Only one instance of\n"
-                      "a named task is allowed. \n\n"
-                      "pmap PID: Displays memory usage by the process (thread) with the matching PID.\n\n"
+                      "a named task is allowed. \n\n");
+            putsUart0("pmap PID: Displays memory usage by the process (thread) with the matching PID.\n\n"
                       "preempt ON|OFF: Turns preemption on or off. The default is preemption on.\n\n"
                       "sched PRIO|RR: Selectes priority or round-robin scheduling. The default is priority scheduling.\n\n");
         }
