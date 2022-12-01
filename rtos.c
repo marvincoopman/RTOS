@@ -664,8 +664,14 @@ void svCallIsr()
             }
             if(data->savedIndex == 0)
                 data->savedIndex = 5;
-
             uint8_t j = 0;
+            while(tcb[i].name[j] != 0)
+            {
+                data->shellOutput[j] = tcb[i].name[j];
+                j++;
+            }
+            data->shellOutput[j] = 0;
+            j = 0;
             uint8_t allocationType = ALLOCATION_EMPTY;
             while(data->savedIndex < 32)
             {
@@ -680,20 +686,20 @@ void svCallIsr()
                     data->value = j;
                     if(allocationType == ALLOCATION_STACK)
                     {
-                        data->shellOutput[0] = 'S';
-                        data->shellOutput[1] = 't';
-                        data->shellOutput[2] = 'a';
-                        data->shellOutput[3] = 'c';
-                        data->shellOutput[4] = 'k';
-                        data->shellOutput[5] = 0;
+                        data->shellOutput[16] = 'S';
+                        data->shellOutput[17] = 't';
+                        data->shellOutput[18] = 'a';
+                        data->shellOutput[19] = 'c';
+                        data->shellOutput[20] = 'k';
+                        data->shellOutput[21] = 0;
                     }
                     else
                     {
-                        data->shellOutput[0] = 'H';
-                        data->shellOutput[1] = 'e';
-                        data->shellOutput[2] = 'a';
-                        data->shellOutput[3] = 'p';
-                        data->shellOutput[4] = 0;
+                        data->shellOutput[16] = 'H';
+                        data->shellOutput[17] = 'e';
+                        data->shellOutput[18] = 'a';
+                        data->shellOutput[19] = 'p';
+                        data->shellOutput[20] = 0;
                     }
                     break;
                 }
@@ -704,20 +710,20 @@ void svCallIsr()
                 data->value = j;
                 if(allocationType == ALLOCATION_STACK)
                 {
-                    data->shellOutput[0] = 'S';
-                    data->shellOutput[1] = 't';
-                    data->shellOutput[2] = 'a';
-                    data->shellOutput[3] = 'c';
-                    data->shellOutput[4] = 'k';
-                    data->shellOutput[5] = 0;
+                    data->shellOutput[16] = 'S';
+                    data->shellOutput[17] = 't';
+                    data->shellOutput[18] = 'a';
+                    data->shellOutput[19] = 'c';
+                    data->shellOutput[20] = 'k';
+                    data->shellOutput[21] = 0;
                 }
                 else
                 {
-                    data->shellOutput[0] = 'H';
-                    data->shellOutput[1] = 'e';
-                    data->shellOutput[2] = 'a';
-                    data->shellOutput[3] = 'p';
-                    data->shellOutput[4] = 0;
+                    data->shellOutput[16] = 'H';
+                    data->shellOutput[17] = 'e';
+                    data->shellOutput[18] = 'a';
+                    data->shellOutput[19] = 'p';
+                    data->shellOutput[20] = 0;
                 }
                 ok = true;
                 data->savedIndex++;
@@ -1369,11 +1375,13 @@ void shell()
                 {
                     continue;
                 }
-                putsUart0("Name\t\t\t");
+                putsUart0(data.shellOutput);
+                putsUart0("\t\t\t");
+                putxUart0(SRAMBOTADDR + ((data.savedIndex - 1) * 1024));
                 putsUart0("\t\t\t");
                 putiUart0(data.value * 1024);
                 putsUart0("\t\t\t");
-                putsUart0(data.shellOutput);
+                putsUart0(&data.shellOutput[16]);
                 putcUart0('\n');
             }
         }
