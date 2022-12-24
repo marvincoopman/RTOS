@@ -1296,7 +1296,7 @@ void shell()
         else if(isCommand(&data, "ps" , 0))
         {
             uint32_t totalCpu = 10000;
-            putsUart0("Name\t\t\tPID\t\t\tPriority\t\t\tCPU%%\n");
+            putsUart0("Name\t\t\tPID\t\t\tPriority\t\t\tState\t\t\tCPU%%\n");
             while(!ok)
             {
                 ok = getData(SVC_PS, &data);
@@ -1466,7 +1466,7 @@ void shell()
             putsUart0("ps: The PID id, process (actually thread) name, and  of CPU time should be stored at a minimum.\n\n"
                       "ipcs: Displays semaphore usage.\n\n"
                       "kill <PID>: This command allows a task to be killed, by referencing the process ID.\n\n");
-            putsUart0("reboot: The command Restarted the processor.\n\n"
+            putsUart0("reboot: The command restarts the processor.\n\n"
                       "pidof <Process_Name>: Returns the PID of a task.\n\n"
                       "run <Process_Name>: Starts a task running in the background if not already running. Only one instance of\n"
                       "a named task is allowed. \n\n");
